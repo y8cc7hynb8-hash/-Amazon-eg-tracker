@@ -91,6 +91,26 @@ def scan_jumia(section_name, url):
     except Exception as e:
         print(f"خطأ أثناء فحص جوميا: {e}", flush=True)
 
+def send_telegram(message):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": message, "disable_web_page_preview": False}
+        r = requests.post(url, json=payload, timeout=5)
+        print("حالة إرسال تليجرام:", r.status_code, flush=True)
+    except Exception as e:
+        print("تعذر الاتصال بتليجرام:", e, flush=True)
+
 def main():
-    print("بدء رادار جوميا مصر...", flush=True)
-    send_telegram(f"
+    print("--- بدأ تشغيل السكربت بنجاح ---", flush=True)
+    send_telegram(f"🚀 بدأ رادار تخفيضات جوميا مصر (يرصد أي خصم من {MIN_DISCOUNT}% فما فوق)...")
+    
+    for round_num in range(12):
+        print(f"--- جولة الفحص رقم {round_num + 1} ---", flush=True)
+        for sec in JUMIA_URLS:
+            scan_jumia(sec["name"], sec["url"])
+            time.sleep(2)
+
+        if round_num < 11:
+            time.sleep(300)
+
+    send_telegram("✅ انتهت جلسة فحص عروض جوميا مصر.")
