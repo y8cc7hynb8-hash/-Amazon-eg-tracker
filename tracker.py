@@ -4,14 +4,19 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-# بيانات تليجرام بيسحبها الكود تلقائياً من الإعدادات الآمنة
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# قائمة المنتجات المطلوب مراقبتها: الكود، السعر المستهدف، واسم توضيحي ليك
-WATCHLIST = [
-    {"asin": "B08N5WRWNW", "target": 1500, "name": "منتج تجريبي 1"},
-    {"asin": "B09V3KXJPB", "target": 3000, "name": "منتج تجريبي 2"},
+# أقل نسبة خصم عايز يجيلك بيها إشعار (تقدر تغيرها لـ 50 أو 60 لو عايز اللقطات القوية فقط)
+MIN_DISCOUNT = 40
+
+# روابط البحث لأهم الأقسام مرتبة بأحدث المنتجات والعروض (تقدر تضيف أي رابط بحث من أمازون هنا)
+CATEGORY_URLS = [
+    {"name": "إلكترونيات", "url": "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901100031"},
+    {"name": "أجهزة منزلية ومطبخ", "url": "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901100031"},
+    {"name": "كمبيوتر وإكسسواراته", "url": "https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901100031"},
+    {"name": "موبايلات وملحقاتها", "url": "https://www.amazon.eg/s?i=mobile&rh=p_n_deal_type%3A26901100031"},
+    {"name": "ألعاب الفيديو", "url": "https://www.amazon.eg/s?i=videogames&rh=p_n_deal_type%3A26901100031"}
 ]
 
 HEADERS = {
@@ -19,50 +24,79 @@ HEADERS = {
     "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
+# ذاكرة مؤقتة لمنع تكرار إرسال نفس العرض خلال الساعتين
+alerted_asins = set()
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
+    payload = {"chat_id": CHAT_ID, "text": message, "disable_web_page_preview": False}
     requests.post(url, json=payload)
 
-def get_price(asin):
-    url = f"https://www.amazon.eg/dp/{asin}"
+def parse_number(text):
+    digits = re.sub(r"[^\d]", "", text)
+    return int(digits) if digits else None
+
+def scan_category(cat_name, url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, "html.parser")
-            price_span = soup.find("span", {"class": "a-price-whole"})
-            if price_span:
-                raw_text = price_span.get_text()
-                digits = re.sub(r"[^\d]", "", raw_text)
-                if digits:
-                    return int(digits)
-    except Exception as e:
-        print(f"Error checking {asin}: {e}")
-    return None
+        if r.status_code != 200:
+            return
+        
+        soup = BeautifulSoup(r.text, "html.parser")
+        items = soup.find_all("div", {"data-component-type": "s-search-result"})
+        
+        for item in items:
+            asin = item.get("data-asin")
+            if not asin or asin in alerted_asins:
+                continue
 
-def main():
-    send_telegram("🚀 بدأ فحص أسعار أمازون مصر لمدة ساعتين...")
-    # 12 جولة × 10 دقائق = ساعتين (120 دقيقة)
-    for round_num in range(12):
-        print(f"--- جولة الفحص رقم {round_num + 1} ---")
-        for item in WATCHLIST:
-            price = get_price(item["asin"])
-            if price:
-                print(f"{item['name']}: {price} EGP")
-                if price <= item["target"]:
+            # استخراج اسم المنتج
+            title_elem = item.find("h2")
+            title = title_elem.get_text().strip() if title_elem else "منتج على أمازون"
+
+            # استخراج السعر الحالي
+            price_whole = item.find("span", {"class": "a-price-whole"})
+            if not price_whole:
+                continue
+            current_price = parse_number(price_whole.get_text())
+
+            # استخراج السعر القديم قبل الخصم لحساب النسبة الحقيقية
+            old_price_span = item.find("span", {"class": "a-text-price"})
+            if not old_price_span:
+                continue
+            old_price_offscreen = old_price_span.find("span", {"class": "a-offscreen"})
+            old_price_text = old_price_offscreen.get_text() if old_price_offscreen else old_price_span.get_text()
+            old_price = parse_number(old_price_text)
+
+            if current_price and old_price and old_price > current_price:
+                discount = int(((old_price - current_price) / old_price) * 100)
+                
+                if discount >= MIN_DISCOUNT:
+                    alerted_asins.add(asin)
                     msg = (
-                        f"🔥 لقطة على أمازون مصر!\n"
-                        f"المنتج: {item['name']}\n"
-                        f"السعر الحالي: {price} ج.م (المستهدف: {item['target']} ج.م)\n"
-                        f"الرابط: https://www.amazon.eg/dp/{item['asin']}"
+                        f"🚨 خصم {discount}% في قسم ({cat_name})!\n\n"
+                        f"📦 {title[:90]}...\n"
+                        f"💰 السعر الآن: {current_price} ج.م (بدلاً من {old_price} ج.م)\n"
+                        f"🔗 الرابط: https://www.amazon.eg/dp/{asin}"
                     )
                     send_telegram(msg)
+                    time.sleep(1)
+    except Exception as e:
+        print(f"Error scanning {cat_name}: {e}")
+
+def main():
+    send_telegram(f"🚀 بدأ الرادار الشامل لأمازون مصر (يرصد أي خصم من {MIN_DISCOUNT}% فما فوق)...")
+    
+    # فحص مستمر لمدة ساعتين (24 جولة × 5 دقائق)
+    for round_num in range(24):
+        for cat in CATEGORY_URLS:
+            scan_category(cat["name"], cat["url"])
             time.sleep(5)
         
-        if round_num < 11:
-            time.sleep(600) # انتظار 10 دقائق قبل الجولة التالية
+        if round_num < 23:
+            time.sleep(300) # انتظار 5 دقائق قبل المسح التالي
 
-    send_telegram("✅ انتهت جلسة المراقبة (ساعتين).")
+    send_telegram("✅ انتهت جلسة الفحص الشامل (ساعتين).")
 
 if __name__ == "__main__":
     main()
