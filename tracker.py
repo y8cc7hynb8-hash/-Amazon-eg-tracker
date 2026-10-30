@@ -7,15 +7,8 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# أقل نسبة خصم تريد تنبيهاً بها (مثلاً 25% فما فوق)
+# أقل نسبة خصم مطلوبة للتنبيه (مثلاً 25% فما فوق)
 MIN_DISCOUNT = 25
-
-# صفحات العروض والأجهزة المخفضة في 2B مصر
-URLS_TO_SCAN = [
-    {"name": "عروض وتخفيضات 2B الرئيسية", "url": "https://2b.com.eg/ar/deals.html"},
-    {"name": "عروض أجهزة اللابتوب والكمبيوتر", "url": "https://2b.com.eg/ar/computers.html?price_drop=1"},
-    {"name": "عروض الموبايلات والإلكترونيات", "url": "https://2b.com.eg/ar/mobiles-tablets.html"}
-]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -37,97 +30,244 @@ def send_telegram(message):
 def parse_price(text):
     if not text:
         return 0
-    # تنظيف النص وإبقاء الأرقام فقط
     digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else 0
 
-def scan_2b(section_name, target_url):
-    print(f"جاري فحص: {section_name}...", flush=True)
-    try:
-        r = requests.get(target_url, headers=HEADERS, timeout=20)
-        print(f"استجابة سيرفر 2B ({section_name}): {r.status_code}", flush=True)
-        
-        if r.status_code != 200:
-            return
-
-        soup = BeautifulSoup(r.text, "html.parser")
-        # فحص بطاقات المنتجات وفق هيكلية متجر 2B
-        products = soup.find_all("li", class_=re.compile(r"product-item"))
-        if not products:
-            products = soup.find_all("div", class_=re.compile(r"product-item-info"))
-
-        print(f"تم العثور على {len(products)} منتج في الصفحة.", flush=True)
-
-        for prod in products:
-            link_elem = prod.find("a", class_=re.compile(r"product-item-link|photo")) or prod.find("a", href=True)
-            if not link_elem or not link_elem.get("href"):
+# --- 1. فحص موقع 2B Egypt ---
+def scan_2b():
+    store_name = "2B Egypt"
+    urls = [
+        "https://2b.com.eg/ar/deals.html",
+        "https://2b.com.eg/ar/computers.html?price_drop=1"
+    ]
+    for url in urls:
+        print(f"[{store_name}] فحص: {url}", flush=True)
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                print(f"[{store_name}] فشل، كود: {r.status_code}", flush=True)
                 continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.find_all("li", class_=re.compile(r"product-item"))
+            for prod in products:
+                link_elem = prod.find("a", class_=re.compile(r"product-item-link|photo")) or prod.find("a", href=True)
+                if not link_elem or not link_elem.get("href"):
+                    continue
+                link = link_elem["href"].strip()
+                if link in alerted_links:
+                    continue
+                
+                title = link_elem.get_text().strip()
+                special_elem = prod.find("span", {"data-price-type": "finalPrice"}) or prod.find("span", class_="special-price")
+                old_elem = prod.find("span", {"data-price-type": "oldPrice"}) or prod.find("span", class_="old-price")
 
-            link = link_elem["href"].strip()
-            if link in alerted_links:
+                curr_p = parse_price(special_elem.get_text()) if special_elem else 0
+                old_p = parse_price(old_elem.get_text()) if old_elem else 0
+                
+                discount = round(((old_p - curr_p) / old_p) * 100) if (old_p > curr_p and curr_p > 0) else 0
+
+                if discount >= MIN_DISCOUNT:
+                    alerted_links.add(link)
+                    send_deal_alert(store_name, title, curr_p, old_p, discount, link)
+        except Exception as e:
+            print(f"[{store_name}] خطأ: {e}", flush=True)
+
+# --- 2. فحص موقع رنين (Raneen) ---
+def scan_raneen():
+    store_name = "رنين (Raneen)"
+    urls = [
+        "https://www.raneen.com/ar/deals",
+        "https://www.raneen.com/ar/electronics-offers"
+    ]
+    for url in urls:
+        print(f"[{store_name}] فحص: {url}", flush=True)
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                print(f"[{store_name}] فشل، كود: {r.status_code}", flush=True)
                 continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.find_all("div", class_=re.compile(r"product-item|productCard"))
+            for prod in products:
+                link_elem = prod.find("a", href=True)
+                if not link_elem or not link_elem.get("href"):
+                    continue
+                href = link_elem["href"]
+                link = href if href.startswith("http") else "https://www.raneen.com" + href
+                if link in alerted_links:
+                    continue
 
-            name_elem = prod.find("strong", class_="product-item-name") or link_elem
-            title = name_elem.get_text().strip() if name_elem else "منتج مخفض على 2B"
+                title = prod.find(class_=re.compile(r"title|name")).get_text().strip() if prod.find(class_=re.compile(r"title|name")) else "عرض رنين"
+                badge = prod.find(class_=re.compile(r"discount|badge|label"))
+                discount = parse_price(badge.get_text()) if badge else 0
 
-            # محاولة قراءة السعر قبل وبعد الخصم
-            special_elem = prod.find("span", {"data-price-type": "finalPrice"}) or prod.find("span", class_="special-price")
-            old_elem = prod.find("span", {"data-price-type": "oldPrice"}) or prod.find("span", class_="old-price")
+                prices = prod.find_all(class_=re.compile(r"price"))
+                curr_p = parse_price(prices[0].get_text()) if prices else 0
+                old_p = parse_price(prices[1].get_text()) if len(prices) > 1 else 0
 
-            # لو كان نظام السعر بسيط
-            if not special_elem:
-                prices = prod.find_all("span", class_="price")
-                if len(prices) >= 2:
-                    old_elem = prices[0]
-                    special_elem = prices[1]
-                elif len(prices) == 1:
-                    special_elem = prices[0]
+                if (old_p > curr_p and curr_p > 0) and discount == 0:
+                    discount = round(((old_p - curr_p) / old_p) * 100)
 
-            curr_price_val = parse_price(special_elem.get_text()) if special_elem else 0
-            old_price_val = parse_price(old_elem.get_text()) if old_elem else 0
+                if discount >= MIN_DISCOUNT:
+                    alerted_links.add(link)
+                    send_deal_alert(store_name, title, curr_p, old_p, discount, link)
+        except Exception as e:
+            print(f"[{store_name}] خطأ: {e}", flush=True)
 
-            # حساب نسبة الخصم
-            discount_percent = 0
-            if old_price_val > curr_price_val and curr_price_val > 0:
-                discount_percent = round(((old_price_val - curr_price_val) / old_price_val) * 100)
+# --- 3. فحص موقع دبي فون (Dubai Phone) ---
+def scan_dubai_phone():
+    store_name = "دبي فون (Dubai Phone)"
+    urls = [
+        "https://dubaiphone.net/ar/deals",
+        "https://dubaiphone.net/ar/flash-sale"
+    ]
+    for url in urls:
+        print(f"[{store_name}] فحص: {url}", flush=True)
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                print(f"[{store_name}] فشل، كود: {r.status_code}", flush=True)
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.find_all("div", class_=re.compile(r"product-layout|product-thumb|product-item"))
+            for prod in products:
+                link_elem = prod.find("a", href=True)
+                if not link_elem or not link_elem.get("href"):
+                    continue
+                link = link_elem["href"]
+                if link in alerted_links:
+                    continue
 
-            # فحص وجود شارة الخصم بالنص في حال لم تكن الأسعار واضحة
-            badge_elem = prod.find(class_=re.compile(r"discount|badge|label", re.I))
-            if badge_elem and discount_percent == 0:
-                m = re.search(r"(\d+)%", badge_elem.get_text())
-                if m:
-                    discount_percent = int(m.group(1))
+                title = link_elem.get_text().strip() or "منتج دبي فون"
+                price_new = prod.find(class_=re.compile(r"price-new|special-price"))
+                price_old = prod.find(class_=re.compile(r"price-old|old-price"))
 
-            if discount_percent >= MIN_DISCOUNT:
-                alerted_links.add(link)
-                msg = (
-                    f"🔥 لقطة جديدة من موقع 2B Egypt ({discount_percent}% خصم)!\n\n"
-                    f"📦 {title[:90]}\n"
-                    f"💰 السعر بعد الخصم: {curr_price_val:,} ج.م\n"
-                    f"🏷 السعر السابق: {old_price_val:,} ج.م\n"
-                    f"🔗 الرابط المباشر: {link}"
-                )
-                send_telegram(msg)
-                time.sleep(1)
+                curr_p = parse_price(price_new.get_text()) if price_new else 0
+                old_p = parse_price(price_old.get_text()) if price_old else 0
 
-    except Exception as e:
-        print(f"خطأ أثناء فحص 2B: {e}", flush=True)
+                discount = round(((old_p - curr_p) / old_p) * 100) if (old_p > curr_p and curr_p > 0) else 0
+
+                if discount >= MIN_DISCOUNT:
+                    alerted_links.add(link)
+                    send_deal_alert(store_name, title, curr_p, old_p, discount, link)
+        except Exception as e:
+            print(f"[{store_name}] خطأ: {e}", flush=True)
+
+# --- 4. فحص موقع راية شوب (RayaShop) ---
+def scan_rayashop():
+    store_name = "راية شوب (Raya Shop)"
+    urls = [
+        "https://www.rayashop.com/ar/deals",
+        "https://www.rayashop.com/ar/flash-deal"
+    ]
+    for url in urls:
+        print(f"[{store_name}] فحص: {url}", flush=True)
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                print(f"[{store_name}] فشل، كود: {r.status_code}", flush=True)
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.find_all("li", class_=re.compile(r"product-item"))
+            for prod in products:
+                link_elem = prod.find("a", class_=re.compile(r"product-item-link|photo")) or prod.find("a", href=True)
+                if not link_elem or not link_elem.get("href"):
+                    continue
+                link = link_elem["href"].strip()
+                if link in alerted_links:
+                    continue
+
+                title = link_elem.get_text().strip() or "عرض راية شوب"
+                curr_elem = prod.find("span", {"data-price-type": "finalPrice"}) or prod.find(class_=re.compile(r"special-price"))
+                old_elem = prod.find("span", {"data-price-type": "oldPrice"}) or prod.find(class_=re.compile(r"old-price"))
+
+                curr_p = parse_price(curr_elem.get_text()) if curr_elem else 0
+                old_p = parse_price(old_elem.get_text()) if old_elem else 0
+
+                discount = round(((old_p - curr_p) / old_p) * 100) if (old_p > curr_p and curr_p > 0) else 0
+
+                if discount >= MIN_DISCOUNT:
+                    alerted_links.add(link)
+                    send_deal_alert(store_name, title, curr_p, old_p, discount, link)
+        except Exception as e:
+            print(f"[{store_name}] خطأ: {e}", flush=True)
+
+# --- 5. فحص موقع بي تك (B.Tech) ---
+def scan_btech():
+    store_name = "بي تك (B.Tech)"
+    urls = [
+        "https://btech.com/ar/flash-deals",
+        "https://btech.com/ar/hot-deals"
+    ]
+    for url in urls:
+        print(f"[{store_name}] فحص: {url}", flush=True)
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code != 200:
+                print(f"[{store_name}] فشل، كود: {r.status_code}", flush=True)
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            products = soup.find_all("div", class_=re.compile(r"product-item|plp-product-card"))
+            for prod in products:
+                link_elem = prod.find("a", href=True)
+                if not link_elem or not link_elem.get("href"):
+                    continue
+                href = link_elem["href"]
+                link = href if href.startswith("http") else "https://btech.com" + href
+                if link in alerted_links:
+                    continue
+
+                title_elem = prod.find(class_=re.compile(r"title|name"))
+                title = title_elem.get_text().strip() if title_elem else "عرض بي تك"
+
+                curr_elem = prod.find(class_=re.compile(r"finalPrice|special-price|current"))
+                old_elem = prod.find(class_=re.compile(r"oldPrice|old-price|was"))
+
+                curr_p = parse_price(curr_elem.get_text()) if curr_elem else 0
+                old_p = parse_price(old_elem.get_text()) if old_elem else 0
+
+                discount = round(((old_p - curr_p) / old_p) * 100) if (old_p > curr_p and curr_p > 0) else 0
+
+                if discount >= MIN_DISCOUNT:
+                    alerted_links.add(link)
+                    send_deal_alert(store_name, title, curr_p, old_p, discount, link)
+        except Exception as e:
+            print(f"[{store_name}] خطأ: {e}", flush=True)
+
+def send_deal_alert(store, title, current_p, old_p, discount, link):
+    msg = (
+        f"🔥 صيد جديد من متجر {store} ({discount}% خصم)!\n\n"
+        f"📦 {title[:80]}\n"
+        f"💰 السعر الآن: {current_p:,} ج.م\n"
+        f"🏷 السعر السابق: {old_p:,} ج.م\n"
+        f"🔗 الرابط: {link}"
+    )
+    send_telegram(msg)
+    time.sleep(1)
 
 def main():
-    print("--- بدأ تشغيل رادار متجر 2B مصر ---", flush=True)
-    send_telegram(f"🚀 بدأ رادار تخفيضات 2B مصر (رصد خصم من {MIN_DISCOUNT}% فما فوق)...")
+    print("--- بدأ رادار الصيد الشامل للمتاجر المصرية ---", flush=True)
+    send_telegram(f"🚀 بدأ رادار الصيد الشامل (2B - رنين - دبي فون - راية شوب - بي تك) برصد خصومات {MIN_DISCOUNT}% فأكثر...")
 
-    # فحص دوري لمدة ساعة (12 جولة × 5 دقائق)
-    for round_num in range(12):
-        print(f"--- جولة الفحص رقم {round_num + 1} ---", flush=True)
-        for sec in URLS_TO_SCAN:
-            scan_2b(sec["name"], sec["url"])
-            time.sleep(2)
+    # تشغيل دوري لمدة ساعة تقريباً (10 جولات، كل جولة تفحص المتاجر الخمسة وتنتظر 5 دقائق)
+    for round_num in range(10):
+        print(f"=== بداية الجولة رقم {round_num + 1} ===", flush=True)
+        scan_2b()
+        time.sleep(3)
+        scan_raneen()
+        time.sleep(3)
+        scan_dubai_phone()
+        time.sleep(3)
+        scan_rayashop()
+        time.sleep(3)
+        scan_btech()
+        time.sleep(3)
 
-        if round_num < 11:
+        if round_num < 9:
+            print("انتظار 5 دقائق للجولة التالية...", flush=True)
             time.sleep(300)
 
-    send_telegram("✅ انتهت جلسة رصد عروض 2B مصر.")
+    send_telegram("✅ انتهت جلسة فحص المتاجر المصرية.")
 
 if __name__ == "__main__":
     main()
