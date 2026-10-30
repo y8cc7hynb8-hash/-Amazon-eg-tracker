@@ -7,10 +7,8 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# أقل نسبة خصم عايز يجيلك بيها إشعار (تقدر تغيرها لـ 50 أو 60 لو عايز اللقطات القوية فقط)
 MIN_DISCOUNT = 40
 
-# روابط البحث لأهم الأقسام مرتبة بأحدث المنتجات والعروض (تقدر تضيف أي رابط بحث من أمازون هنا)
 CATEGORY_URLS = [
     {"name": "إلكترونيات", "url": "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901100031"},
     {"name": "أجهزة منزلية ومطبخ", "url": "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901100031"},
@@ -20,47 +18,51 @@ CATEGORY_URLS = [
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "ar,en-US;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 }
 
-# ذاكرة مؤقتة لمنع تكرار إرسال نفس العرض خلال الساعتين
 alerted_asins = set()
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "disable_web_page_preview": False}
-    requests.post(url, json=payload)
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        print("Telegram response status:", r.status_code, flush=True)
+    except Exception as e:
+        print("Telegram error:", e, flush=True)
 
 def parse_number(text):
     digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else None
 
 def scan_category(cat_name, url):
+    print(f"جاري فحص قسم: {cat_name}...", flush=True)
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        print(f"حالة استجابة القسم {cat_name}: {r.status_code}", flush=True)
         if r.status_code != 200:
             return
         
         soup = BeautifulSoup(r.text, "html.parser")
         items = soup.find_all("div", {"data-component-type": "s-search-result"})
+        print(f"عدد المنتجات المكتشفة في {cat_name}: {len(items)}", flush=True)
         
         for item in items:
             asin = item.get("data-asin")
             if not asin or asin in alerted_asins:
                 continue
 
-            # استخراج اسم المنتج
             title_elem = item.find("h2")
             title = title_elem.get_text().strip() if title_elem else "منتج على أمازون"
 
-            # استخراج السعر الحالي
             price_whole = item.find("span", {"class": "a-price-whole"})
             if not price_whole:
                 continue
             current_price = parse_number(price_whole.get_text())
 
-            # استخراج السعر القديم قبل الخصم لحساب النسبة الحقيقية
             old_price_span = item.find("span", {"class": "a-text-price"})
             if not old_price_span:
                 continue
@@ -82,21 +84,18 @@ def scan_category(cat_name, url):
                     send_telegram(msg)
                     time.sleep(1)
     except Exception as e:
-        print(f"Error scanning {cat_name}: {e}")
+        print(f"Error scanning {cat_name}: {e}", flush=True)
 
 def main():
+    print("بدء تنفيذ السكريبت وإرسال تنبيه البداية...", flush=True)
     send_telegram(f"🚀 بدأ الرادار الشامل لأمازون مصر (يرصد أي خصم من {MIN_DISCOUNT}% فما فوق)...")
     
-    # فحص مستمر لمدة ساعتين (24 جولة × 5 دقائق)
-    for round_num in range(24):
-        for cat in CATEGORY_URLS:
-            scan_category(cat["name"], cat["url"])
-            time.sleep(5)
+    for cat in CATEGORY_URLS:
+        scan_category(cat["name"], cat["url"])
+        time.sleep(2)
         
-        if round_num < 23:
-            time.sleep(300) # انتظار 5 دقائق قبل المسح التالي
-
-    send_telegram("✅ انتهت جلسة الفحص الشامل (ساعتين).")
+    print("انتهت الجولة الأولى بنجاح.", flush=True)
+    send_telegram("✅ تمت الجولة الأولى بنجاح والسيستم يعمل بكفاءة.")
 
 if __name__ == "__main__":
     main()
