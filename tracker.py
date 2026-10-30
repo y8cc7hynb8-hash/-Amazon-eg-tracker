@@ -7,8 +7,15 @@ from bs4 import BeautifulSoup
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# رابط صفحة عروض اليوم في أمازون مصر
-DEALS_URL = "https://www.amazon.eg/deals"
+# أقل نسبة خصم تريد تلقي إشعار بها
+MIN_DISCOUNT = 40
+
+# روابط صفحات التخفيضات وأكبر العروض في جوميا مصر
+JUMIA_URLS = [
+    {"name": "عروض الفلاش والتخفيضات", "url": "https://www.jumia.com.eg/ar/flash-sales/"},
+    {"name": "إلكترونيات وموبايلات", "url": "https://www.jumia.com.eg/ar/phones-tablets/?sort=discount"},
+    {"name": "أجهزة منزلية وتلفزيونات", "url": "https://www.jumia.com.eg/ar/home-office-appliances/?sort=discount"}
+]
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -16,7 +23,7 @@ HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 }
 
-alerted_asins = set()
+alerted_links = set()
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -24,78 +31,66 @@ def send_telegram(message):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print("Telegram error:", e)
+        print("Telegram error:", e, flush=True)
 
 def parse_number(text):
     digits = re.sub(r"[^\d]", "", text)
     return int(digits) if digits else None
 
-def check_deals():
-    print("جاري فحص صفحة عروض أمازون...", flush=True)
+def scan_jumia(section_name, url):
+    print(f"جاري فحص: {section_name}...", flush=True)
     try:
-        r = requests.get(DEALS_URL, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        print(f"استجابة سيرفر جوميا ({section_name}): {r.status_code}", flush=True)
         if r.status_code != 200:
-            print(f"فشل الاتصال بصفحة العروض، كود الاستجابة: {r.status_code}")
             return
-        
+
         soup = BeautifulSoup(r.text, "html.parser")
-        # البحث عن عروض المنتجات في الصفحة الرئيسية للعروض
-        deals = soup.find_all("div", {"data-testid": "grid-deals-container"}) or soup.find_all("div", {"class": "DealGridItem-module__dealItemContent_1vnt0fuGt53pxYkuezpMRV"})
-        
-        # لو لم يتم العثور على الحاويات بالشكل التقليدي، نبحث عن روابط المنتجات مباشرة
-        if not deals:
-            deals = soup.find_all("div", class_=re.compile("dealCard", re.I))
+        products = soup.find_all("article", class_="prd")
 
-        print(f"تم العثور على {len(deals)} عرض حالي في الصفحة.", flush=True)
+        print(f"عدد المنتجات الموجودة في الصفحة: {len(products)}", flush=True)
 
-        for deal in deals[:20]: # فحص أول 20 عرض قوي
-            # محاولة استخراج الرابط أو الـ ASIN
-            link_elem = deal.find("a", href=True)
-            if not link_elem:
-                continue
-            
-            href = link_elem["href"]
-            asin_match = re.search(r"/dp/([A-Z0-9]{10})", href)
-            if not asin_match:
-                asin_match = re.search(r"g/([A-Z0-9]{10})/", href)
-            
-            if not asin_match:
-                continue
-                
-            asin = asin_match.group(1)
-            if asin in alerted_asins:
+        for prod in products:
+            link_elem = prod.find("a", class_="core")
+            if not link_elem or not link_elem.get("href"):
                 continue
 
-            # استخراج عنوان المنتج والخصم إن وجد
-            title = link_elem.get_text().strip() or "عرض مميز على أمازون"
-            
-            # استخراج نسبة الخصم لو متوفرة في النص
-            deal_text = deal.get_text()
-            discount_match = re.search(r"(\d+)%\s*خصم|خصم\s*(\d+)%", deal_text)
-            
-            alerted_asins.add(asin)
-            msg = (
-                🔥 لقطة جديدة من صفحة عروض أمازون مصر!\n\n"
-                f"📦 {title[:80]}...\n"
-                f"🔗 رابط العرض مباشرة: https://www.amazon.eg/dp/{asin}"
-            )
-            send_telegram(msg)
-            time.sleep(1)
+            product_link = "https://www.jumia.com.eg" + link_elem["href"]
+            if product_link in alerted_links:
+                continue
+
+            name_elem = prod.find("h3", class_="name")
+            title = name_elem.get_text().strip() if name_elem else "منتج مخفض على جوميا"
+
+            # استخراج نسبة الخصم
+            discount_elem = prod.find("div", class_="bdg")
+            if not discount_elem:
+                continue
+            discount_text = discount_elem.get_text()
+            discount_val = parse_number(discount_text)
+
+            # استخراج الأسعار
+            current_elem = prod.find("div", class_="prc")
+            current_price = current_elem.get_text().strip() if current_elem else "غير محدد"
+
+            old_elem = prod.find("div", class_="old")
+            old_price = old_elem.get_text().strip() if old_elem else "غير متوفر"
+
+            if discount_val and discount_val >= MIN_DISCOUNT:
+                alerted_links.add(product_link)
+                msg = (
+                    f"🚨 صيد لقطة من جوميا مصر ({discount_val}% خصم)!\n\n"
+                    f"📦 {title}\n"
+                    f"💰 السعر الآن: {current_price} (قبل الخصم: {old_price})\n"
+                    f"📁 القسم: {section_name}\n"
+                    f"🔗 الرابط: {product_link}"
+                )
+                send_telegram(msg)
+                time.sleep(1)
 
     except Exception as e:
-        print(f"Error checking deals: {e}", flush=True)
+        print(f"خطأ أثناء فحص جوميا: {e}", flush=True)
 
 def main():
-    send_telegram("🚀 بدأ رادار صفحة العروض المباشرة لأمازون مصر...")
-    
-    # فحص العروض لمدة ساعتين (12 جولة كل 10 دقائق)
-    for round_num in range(12):
-        print(f"--- الجولة رقم {round_num + 1} ---", flush=True)
-        check_deals()
-        if round_num < 11:
-            time.sleep(600) # انتظار 10 دقائق
-
-    send_telegram("✅ انتهت جلسة رصد عروض أمازون.")
-
-if __name__ == "__main__":
-    main()
+    print("بدء رادار جوميا مصر...", flush=True)
+    send_telegram(f"
