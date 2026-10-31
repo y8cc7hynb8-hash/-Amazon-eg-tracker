@@ -11,7 +11,7 @@ CHAT_ID = os.environ.get("CHAT_ID")
 # نسبة الخصم المطلوبة للتنبيه (40% فما فوق)
 MIN_DISCOUNT = 40
 
-# قائمة User-Agents عشوائية لمتصفحات حقيقية متنوعة
+# قائمة User-Agents عشوائية لمتصفحات حقيقية
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -63,7 +63,7 @@ def send_deal_alert(store, title, current_p, old_p, discount, link):
     send_telegram(msg)
     time.sleep(2)
 
-# --- فحص متجر 2B Egypt ---
+# --- 1. فحص متجر 2B Egypt ---
 def scan_2b():
     store_name = "2B Egypt"
     urls = [
@@ -100,10 +100,9 @@ def scan_2b():
                     send_deal_alert(store_name, title, curr_p, old_p, discount, link)
         except Exception as e:
             print(f"[{store_name}] خطأ: {e}", flush=True)
-        # محاكاة إنسانية: انتظار عشوائي بين الصفحات
-        time.sleep(random.uniform(10, 18))
+        time.sleep(random.uniform(10, 16))
 
-# --- فحص متجر رنين (Raneen) ---
+# --- 2. فحص متجر رنين (Raneen) ---
 def scan_raneen():
     store_name = "رنين (Raneen)"
     urls = [
@@ -139,24 +138,74 @@ def scan_raneen():
                     send_deal_alert(store_name, title, curr_p, old_p, discount, link)
         except Exception as e:
             print(f"[{store_name}] خطأ: {e}", flush=True)
-        # محاكاة إنسانية: انتظار عشوائي بين الصفحات
-        time.sleep(random.uniform(10, 18))
+        time.sleep(random.uniform(10, 16))
+
+# --- 3. فحص موقع كنز (Kenzz) ---
+def scan_kenzz():
+    store_name = "كنز (Kenzz)"
+    urls = [
+        "https://kenzz.com/offers",
+        "https://kenzz.com/categories/electronics"
+    ]
+    for url in urls:
+        print(f"[{store_name}] فحص: {url}", flush=True)
+        try:
+            r = session.get(url, headers=get_headers(), timeout=20)
+            if r.status_code != 200:
+                print(f"[{store_name}] تخطي، كود: {r.status_code}", flush=True)
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            # استهداف كروت المنتجات الشائعة في كنز
+            products = soup.find_all("div", class_=re.compile(r"product|card|item", re.I))
+            for prod in products:
+                link_elem = prod.find("a", href=True)
+                if not link_elem or not link_elem.get("href"):
+                    continue
+                href = link_elem["href"].strip()
+                link = href if href.startswith("http") else "https://kenzz.com" + href
+                if link in alerted_links:
+                    continue
+
+                # استخراج اسم المنتج
+                title_elem = prod.find(class_=re.compile(r"title|name", re.I)) or link_elem
+                title = title_elem.get_text().strip() if title_elem else "منتج كنز"
+                if len(title) < 4:
+                    continue
+
+                # استخراج شارة الخصم أو الأسعار
+                badge_elem = prod.find(class_=re.compile(r"discount|badge|percent|off", re.I))
+                discount = parse_price(badge_elem.get_text()) if badge_elem else 0
+
+                prices = prod.find_all(class_=re.compile(r"price", re.I))
+                curr_p = parse_price(prices[0].get_text()) if prices else 0
+                old_p = parse_price(prices[1].get_text()) if len(prices) > 1 else 0
+
+                if (old_p > curr_p and curr_p > 0) and discount == 0:
+                    discount = round(((old_p - curr_p) / old_p) * 100)
+
+                if discount >= MIN_DISCOUNT:
+                    alerted_links.add(link)
+                    send_deal_alert(store_name, title, curr_p, old_p, discount, link)
+        except Exception as e:
+            print(f"[{store_name}] خطأ: {e}", flush=True)
+        time.sleep(random.uniform(10, 16))
 
 def main():
-    print("--- بدأ رادار الصيد (2B ورنين) بخصومات 40%+ ---", flush=True)
-    send_telegram(f"🚀 بدأ رادار الصيد لمتجري (2B ورنين) يرصد أي خصم من {MIN_DISCOUNT}% فما فوق بنمط تصفح هادئ...")
+    print("--- بدأ رادار الصيد (2B، رنين، كنز) بخصومات 40%+ ---", flush=True)
+    send_telegram(f"🚀 بدأ رادار الصيد لـ (2B - رنين - كنز) يرصد أي خصم {MIN_DISCOUNT}% فأكثر بنمط تصفح هادئ...")
 
-    # 4 جولات فحص فقط (لتفادي أي حظر IP ناتج عن الجلسات الطويلة)
+    # 4 جولات فحص فقط (جلسة هادئة لتفادي الحظر)
     for round_num in range(4):
         print(f"=== بداية الجولة رقم {round_num + 1} ===", flush=True)
         
         scan_2b()
         time.sleep(random.uniform(15, 25))
         scan_raneen()
+        time.sleep(random.uniform(15, 25))
+        scan_kenzz()
 
         if round_num < 3:
-            # انتظار بين 12 إلى 15 دقيقة بين الجولات
-            wait_seconds = random.randint(720, 900)
+            wait_seconds = random.randint(720, 900)  # انتظار 12 إلى 15 دقيقة
             print(f"انتظار {wait_seconds // 60} دقيقة قبل الجولة التالية محاكاة للتصفح الطبيعي...", flush=True)
             time.sleep(wait_seconds)
 
