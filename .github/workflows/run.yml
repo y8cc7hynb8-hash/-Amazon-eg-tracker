@@ -2,11 +2,12 @@ name: Run Amazon Tracker
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *' # يعمل تلقائياً كل ساعة
 
 jobs:
   track:
     runs-on: ubuntu-latest
-    timeout-minutes: 130
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -14,13 +15,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      - name: Install libraries
-        run: pip install requests beautifulsoup4
-
-      - name: Start tracking
+      - name: Run tracker
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python -u tracker.py
+        run: |
+          python -u tracker.py
