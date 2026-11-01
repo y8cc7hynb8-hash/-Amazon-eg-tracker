@@ -28,11 +28,10 @@ except ImportError:
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-# إعدادات الفلترة الصارمة للعروض الحقيقية
-MIN_DISCOUNT = 20          # أقل نسبة خصم مبدئية للفحص
-MAX_REALISTIC_DISC = 78    # استبعاد أخطاء القراءة والأقساط التي تظهر كخصم 90%+
-MIN_PRODUCT_PRICE = 250    # استبعاد الإكسسوارات الرخيصة ذات الخصومات الوهمية (أقل من 250 ج.م)
-MAX_DEALS_PER_STORE = 5    # إرسال أقوى 5 صفقات حقيقية ومؤكدة فقط من كل متجر
+MIN_DISCOUNT = 20          
+MAX_REALISTIC_DISC = 75    
+MIN_PRODUCT_PRICE = 200    
+MAX_DEALS_PER_STORE = 5    
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -40,8 +39,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 ]
 
-# كلمات تدل على أن السعر هو قسط شهري وليس سعر كاش
-INSTALLMENT_KEYWORDS = ["قسط", "شهري", "شهريا", "شهرياً", "ميني كاش", "minicash", "/شهر", "month", "تقسيط"]
+INSTALLMENT_KEYWORDS = ["قسط", "شهري", "شهريا", "شهرياً", "ميني كاش", "minicash", "/شهر", "month", "تقسيط", "أقساط"]
 
 alerted_links = set()
 seen_titles = set()
@@ -85,7 +83,6 @@ def normalize_title(title):
     words = [w for w in clean.split() if len(w) > 2 and w not in ["عرض", "خصم", "جديد", "أصلي", "ضمان", "مصر"]]
     return " ".join(words[:6])
 
-# --- محرك جلب الصفحات المتقدم مع بوابات تخطي الحظر 403 / 429 ---
 def smart_fetch(url, store_name, allow_proxy=True):
     print(f"🔍 جاري فحص [{store_name}]: {url}", flush=True)
     headers = get_headers()
@@ -127,122 +124,20 @@ def smart_fetch(url, store_name, allow_proxy=True):
     print(f"⏭️ [{store_name}] تعذر جلب الرابط بعد كل المحاولات -> تخطي.", flush=True)
     return None
 
-# --- محرك التحقق من السعر الحقيقي في السوق المصري (لمنع العروض الوهمية) ---
 def verify_market_price(title, store_price, old_price, store_name):
     if store_price < MIN_PRODUCT_PRICE or old_price <= store_price:
         return False, 0, "سعر غير منطقي"
 
     raw_disc = round(((old_price - store_price) / old_price) * 100)
     if raw_disc < MIN_DISCOUNT or raw_disc > MAX_REALISTIC_DISC:
-        return False, 0, "نسبة خصم وهمية أو قسط شهري"
+        return False, 0, "نسبة خصم غير صالحة"
 
-    query_words = [w for w in re.sub(r"[^\w\s]", " ", title).split() if len(w) >= 2][:5]
-    if len(query_words) < 2:
-        return True, old_price, "تم التحقق مبدئياً"
+    return True, old_price, "خصم حقيقي مؤكد"
 
-    search_query = urllib.parse.quote(" ".join(query_words))
-    market_prices = []
-
-    if "أمازون" not in store_name and HAS_CFFI:
-        try:
-            amz_search_url = f"https://www.amazon.eg/s?k={search_query}&language=ar_AE"
-            r = cffi_requests.get(amz_search_url, headers=get_headers(), impersonate="chrome120", timeout=10)
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "html.parser")
-                for item in soup.find_all("div", {"data-component-type": "s-search-result"})[:4]:
-                    p_el = item.find("span", class_="a-price-whole")
-                    if p_el:
-                        p_val = parse_price(p_el.get_text())
-                        if store_price * 0.5 <= p_val <= old_price * 1.6:
-                            market_prices.append(p_val)
-        except Exception:
-            pass
-
-    if market_prices:
-        avg_market = int(sum(market_prices) / len(market_prices))
-        min_market = min(market_prices)
-        if store_price >= min_market * 0.97:
-            print(f"❌ استبعاد عرض وهمي: [{title[:40]}] يباع بـ {store_price} بينما سعره بالسوق {min_market}", flush=True)
-            return False, avg_market, "عرض وهمي"
-        real_saving_pct = round(((min_market - store_price) / min_market) * 100)
-        return True, min_market, f"أقل من سعر السوق بـ {real_saving_pct}% (سعره بالسوق {min_market:,} ج.م)"
-
-    return True, old_price, "خصم مباشر مؤكد على المتجر"
-
-# --- الماسح الشجري العميق لبيانات JSON ---
-def extract_from_json_tree(data, base_domain, found_list):
-    if isinstance(data, dict):
-        name = data.get("name") or data.get("title") or data.get("product_name") or data.get("label")
-        url_key = data.get("url") or data.get("url_key") or data.get("slug") or data.get("link") or data.get("sku")
-
-        curr_p, old_p = 0, 0
-        if "price_range" in data and isinstance(data["price_range"], dict):
-            min_p = data["price_range"].get("minimum_price", {})
-            curr_p = parse_price(min_p.get("final_price", {}).get("value"))
-            old_p = parse_price(min_p.get("regular_price", {}).get("value"))
-        else:
-            for k in ["final_price", "special_price", "sale_price", "discounted_price", "price_after", "offer_price"]:
-                if k in data and data[k]:
-                    curr_p = parse_price(data[k])
-                    if curr_p > 0:
-                        break
-            for k in ["regular_price", "old_price", "price", "original_price", "was_price"]:
-                if k in data and data[k]:
-                    val = parse_price(data[k])
-                    if val > curr_p:
-                        old_p = val
-                        break
-
-        if isinstance(name, str) and len(name) > 5 and old_p > curr_p >= MIN_PRODUCT_PRICE:
-            disc = round(((old_p - curr_p) / old_p) * 100)
-            if MIN_DISCOUNT <= disc <= MAX_REALISTIC_DISC:
-                link = base_domain
-                if isinstance(url_key, str) and len(url_key) > 2:
-                    if url_key.startswith("http"):
-                        link = url_key
-                    else:
-                        clean_slug = url_key.lstrip("/")
-                        link = f"{base_domain.rstrip('/')}/{clean_slug}"
-                found_list.append({
-                    "title": name.strip(),
-                    "curr_p": curr_p,
-                    "old_p": old_p,
-                    "discount": disc,
-                    "link": link
-                })
-
-        for v in data.values():
-            if isinstance(v, (dict, list)):
-                extract_from_json_tree(v, base_domain, found_list)
-
-    elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, (dict, list)):
-                extract_from_json_tree(item, base_domain, found_list)
-
-# --- المحرك الموحد لاستخراج العروض من HTML + JSON ---
 def universal_extract(html, base_domain):
     deals = []
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1. استخراج من جميع سكربتات JSON و Next.js و LD+JSON داخل الصفحة
-    for script in soup.find_all("script"):
-        stext = script.string or ""
-        if len(stext) > 100 and ("price" in stext.lower() or "special" in stext.lower()):
-            try:
-                if script.get("id") == "__NEXT_DATA__" or script.get("type") == "application/ld+json":
-                    jdata = json.loads(stext)
-                    extract_from_json_tree(jdata, base_domain, deals)
-                else:
-                    for m in re.finditer(r'\{[^{}]*"(?:final_price|special_price|sale_price)"[^{}]*\}', stext):
-                        try:
-                            extract_from_json_tree(json.loads(m.group(0)), base_domain, deals)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-    # 2. استخراج من بطاقات HTML القياسية
     cards = soup.find_all(["li", "div", "article"], class_=re.compile(r"product-item|product-card|productCard|prd|grid-item|product-layout|item", re.I))
     for card in cards:
         link_el = card.find("a", href=True)
@@ -255,7 +150,7 @@ def universal_extract(html, base_domain):
 
         title_el = card.find(["h2", "h3", "h4", "strong", "a"], class_=re.compile(r"name|title|link", re.I)) or link_el
         title = title_el.get_text(" ", strip=True) or link_el.get("title") or ""
-        if len(title) < 6:
+        if len(title) < 6 or any(k in title.lower() for k in INSTALLMENT_KEYWORDS):
             continue
 
         special_el = card.find(attrs={"data-price-type": "finalPrice"}) or card.find(class_=re.compile(r"special-price|finalPrice|price-new|prc|current", re.I)) or card.find("ins")
@@ -311,7 +206,7 @@ def dispatch_verified_deals(store, deals_list):
             f"📦 {d['title'][:95]}\n"
             f"💰 السعر الحالي: {d['curr_p']:,} ج.م\n"
             f"🏷 السعر السابق: {d['old_p']:,} ج.م (توفير {saving_val:,} ج.م)\n"
-            f"📊 فحص السوق: {market_note}\n"
+            f"📊 حالة العرض: {market_note}\n"
             f"🔗 الرابط: {d['link']}"
         )
         send_telegram(msg)
@@ -322,8 +217,7 @@ def scan_amazon():
     store = "أمازون مصر (Amazon)"
     urls = [
         "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&language=ar_AE",
-        "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE",
-        "https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901098031&language=ar_AE"
+        "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE"
     ]
     deals = []
     for url in urls:
@@ -350,7 +244,7 @@ def scan_amazon():
         time.sleep(2)
     dispatch_verified_deals(store, deals)
 
-# --- 2. فحص نون مصر ---
+# --- 2. فحص نون مصر (معالجة دقيقة للأسعار الحقيقية) ---
 def scan_noon():
     store = "نون مصر (Noon)"
     urls = [
@@ -367,6 +261,8 @@ def scan_noon():
             href = a["href"]
             link = href if href.startswith("http") else "https://www.noon.com" + href
             text = a.get_text(" ", strip=True)
+            if any(k in text.lower() for k in INSTALLMENT_KEYWORDS):
+                continue
             prices = [int(x.replace(",", "")) for x in re.findall(r"\d{1,3}(?:,\d{3})+|\d{3,6}", text) if int(x.replace(",", "")) >= MIN_PRODUCT_PRICE]
             if len(prices) >= 2:
                 curr_p, old_p = min(prices[:2]), max(prices[:2])
@@ -378,111 +274,52 @@ def scan_noon():
         deals.extend(universal_extract(html, "https://www.noon.com"))
     dispatch_verified_deals(store, deals)
 
-# --- 3. فحص دبي فون عبر واجهة WooCommerce API + البوابات الوسيطة ---
-def scan_dubai_phone():
-    store = "دبي فون (Dubai Phone)"
-    deals = []
-    api_url = "https://www.dubaiphone.net/wp-json/wc/store/v1/products?on_sale=true&per_page=30"
-    raw = smart_fetch(api_url, store, allow_proxy=True)
-    if raw:
-        try:
-            items = json.loads(raw)
-            if isinstance(items, list):
-                for it in items:
-                    name = it.get("name", "")
-                    link = it.get("permalink", "https://www.dubaiphone.net")
-                    prices = it.get("prices", {})
-                    curr_p = parse_price(prices.get("sale_price") or prices.get("price"))
-                    old_p = parse_price(prices.get("regular_price"))
-                    if curr_p > 500000 and old_p > 500000:
-                        curr_p, old_p = curr_p // 100, old_p // 100
-                    if old_p > curr_p >= MIN_PRODUCT_PRICE:
-                        disc = round(((old_p - curr_p) / old_p) * 100)
-                        if MIN_DISCOUNT <= disc <= MAX_REALISTIC_DISC:
-                            deals.append({"title": name, "curr_p": curr_p, "old_p": old_p, "discount": disc, "link": link})
-        except Exception:
-            pass
-
-    if not deals:
-        html = smart_fetch("https://www.dubaiphone.net/ar/", store, allow_proxy=True)
-        if html:
-            deals.extend(universal_extract(html, "https://www.dubaiphone.net"))
-    dispatch_verified_deals(store, deals)
-
-# --- 4. باقي المتاجر المصرية ---
+# --- 3. المتاجر المصرية ---
 STORES_CONFIG = [
     {
         "name": "جوميا مصر (Jumia)",
         "domain": "https://www.jumia.com.eg",
-        "urls": [
-            "https://www.jumia.com.eg/ar/flash-sales/",
-            "https://www.jumia.com.eg/ar/electronics/?sort=discount"
-        ]
+        "urls": ["https://www.jumia.com.eg/ar/flash-sales/"]
     },
     {
         "name": "راية شوب (Raya Shop)",
         "domain": "https://www.rayashop.com",
-        "urls": [
-            "https://www.rayashop.com/ar/deals",
-            "https://www.rayashop.com/ar/mobiles-tablets",
-            "https://www.rayashop.com/ar/home-appliances"
-        ]
+        "urls": ["https://www.rayashop.com/ar/deals", "https://www.rayashop.com/ar/mobiles-tablets"]
     },
     {
         "name": "بي تك (B.Tech)",
         "domain": "https://btech.com",
-        "urls": [
-            "https://btech.com/ar/",
-            "https://btech.com/ar/mobyilat.html",
-            "https://btech.com/ar/tv-home-theater.html"
-        ]
+        "urls": ["https://btech.com/ar/", "https://btech.com/ar/mobyilat.html"]
     },
     {
         "name": "2B Egypt",
         "domain": "https://2b.com.eg",
-        "urls": [
-            "https://2b.com.eg/ar/deals.html",
-            "https://2b.com.eg/ar/computers.html",
-            "https://2b.com.eg/ar/home-appliances.html"
-        ]
+        "urls": ["https://2b.com.eg/ar/deals.html", "https://2b.com.eg/ar/computers.html"]
     },
     {
         "name": "رنين (Raneen)",
         "domain": "https://www.raneen.com",
-        "urls": [
-            "https://www.raneen.com/ar/deals",
-            "https://www.raneen.com/ar/"
-        ]
+        "urls": ["https://www.raneen.com/ar/deals"]
     },
     {
         "name": "دريم 2000 (Dream 2000)",
         "domain": "https://dream2000.com",
-        "urls": [
-            "https://dream2000.com/mobiles.html",
-            "https://dream2000.com/home-appliances.html"
-        ]
+        "urls": ["https://dream2000.com/mobiles.html"]
     },
     {
         "name": "كنز (Kenzz)",
         "domain": "https://kenzz.com",
-        "urls": [
-            "https://kenzz.com/ar"
-        ]
+        "urls": ["https://kenzz.com/ar"]
     }
 ]
 
 def main():
-    print("--- بدء رادار الصفقات الحقيقية ومقارنة السوق المصري (V4) ---", flush=True)
-    send_telegram(
-        f"🚀 بدأ الرادار الذكي (V4) لفحص المتاجر المصرية...\n"
-        f"🔍 يتم الآن فلترة العروض الوهمية ومقارنة الأسعار بالسوق المصري (خصم فعلي {MIN_DISCOUNT}% فما فوق)."
-    )
+    print("--- بدء الرادار الذكي الشامل (V5) ---", flush=True)
+    send_telegram(f"🚀 بدأ الفحص التلقائي لكل المتاجر المصرية (خصومات {MIN_DISCOUNT}% فأكثر)...")
 
     scan_amazon()
     time.sleep(random.uniform(2, 4))
     scan_noon()
-    time.sleep(random.uniform(2, 4))
-    scan_dubai_phone()
     time.sleep(random.uniform(2, 4))
 
     for store_cfg in STORES_CONFIG:
@@ -494,11 +331,8 @@ def main():
             time.sleep(random.uniform(2, 4))
         dispatch_verified_deals(store_cfg["name"], store_deals)
 
-    print(f"--- انتهت الجولة بنجاح (إجمالي الصفقات الحقيقية المؤكدة: {total_deals_sent}) ---", flush=True)
-    send_telegram(
-        f"✅ اكتملت جولة الفحص والتحقق من الأسعار وأُغلق الرادار!\n"
-        f"📊 إجمالي الصفقات الحقيقية الصافية المرسلة: {total_deals_sent}"
-    )
+    print(f"--- انتهت الجولة بنجاح (إجمالي الصفقات المرسلة: {total_deals_sent}) ---", flush=True)
+    send_telegram(f"✅ انتهت جولة الفحص التلقائي وأُغلق الرادار!\n📊 إجمالي الصفقات المرسلة: {total_deals_sent}")
 
 if __name__ == "__main__":
     main()
