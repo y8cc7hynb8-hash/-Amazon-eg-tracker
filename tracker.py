@@ -69,12 +69,10 @@ def parse_price(text):
     if not text:
         return 0
     text = str(text)
-    # استبعاد النصوص التي تمثل أقساطاً شهرية
     if any(k in text.lower() for k in INSTALLMENT_KEYWORDS):
         return 0
     arabic_digits = str.maketrans("٠١٢٣٤٥٦٧٨٩٫٬", "0123456789.,")
     text = text.translate(arabic_digits)
-    # إزالة الكسور العشرية مثل .00 مع الحفاظ على نقاط اختصار العملة ج.م.
     text = re.sub(r"\.\d{1,2}(?!\d)", "", text)
     matches = re.findall(r"\d{1,3}(?:,\d{3})+|\d+", text)
     if not matches:
@@ -92,7 +90,6 @@ def smart_fetch(url, store_name, allow_proxy=True):
     print(f"🔍 جاري فحص [{store_name}]: {url}", flush=True)
     headers = get_headers()
 
-    # 1. المحاولة المباشرة عبر انتحال بصمات المتصفحات
     if HAS_CFFI:
         for fp in ["chrome120", "safari17_0", "edge101"]:
             try:
@@ -103,7 +100,6 @@ def smart_fetch(url, store_name, allow_proxy=True):
             except Exception:
                 continue
 
-    # 2. المحاولة عبر Cloudscraper
     if scraper:
         try:
             r = scraper.get(url, headers=headers, timeout=15)
@@ -113,7 +109,6 @@ def smart_fetch(url, store_name, allow_proxy=True):
         except Exception:
             pass
 
-    # 3. البوابات الوسيطة المجانية لتخطي حظر الـ IP (403 و 429 كما في جوميا ودبي فون)
     if allow_proxy:
         encoded_url = urllib.parse.quote(url, safe="")
         proxy_gateways = [
@@ -134,7 +129,6 @@ def smart_fetch(url, store_name, allow_proxy=True):
 
 # --- محرك التحقق من السعر الحقيقي في السوق المصري (لمنع العروض الوهمية) ---
 def verify_market_price(title, store_price, old_price, store_name):
-    # فحص المنطق الرياضي الأساسي للسعر
     if store_price < MIN_PRODUCT_PRICE or old_price <= store_price:
         return False, 0, "سعر غير منطقي"
 
@@ -142,7 +136,6 @@ def verify_market_price(title, store_price, old_price, store_name):
     if raw_disc < MIN_DISCOUNT or raw_disc > MAX_REALISTIC_DISC:
         return False, 0, "نسبة خصم وهمية أو قسط شهري"
 
-    # استخراج الكلمات المفتاحية للموديل للبحث عنه في السوق المصري
     query_words = [w for w in re.sub(r"[^\w\s]", " ", title).split() if len(w) >= 2][:5]
     if len(query_words) < 2:
         return True, old_price, "تم التحقق مبدئياً"
@@ -150,7 +143,6 @@ def verify_market_price(title, store_price, old_price, store_name):
     search_query = urllib.parse.quote(" ".join(query_words))
     market_prices = []
 
-    # فحص السعر المرجعي في السوق عبر بحث أمازون مصر السريع (لو لم يكن المتجر هو أمازون نفسه)
     if "أمازون" not in store_name and HAS_CFFI:
         try:
             amz_search_url = f"https://www.amazon.eg/s?k={search_query}&language=ar_AE"
@@ -161,7 +153,6 @@ def verify_market_price(title, store_price, old_price, store_name):
                     p_el = item.find("span", class_="a-price-whole")
                     if p_el:
                         p_val = parse_price(p_el.get_text())
-                        # التأكد من أن المنتج المشابه في نفس الفئة السعرية التقريبية وليس إكسسواراً له
                         if store_price * 0.5 <= p_val <= old_price * 1.6:
                             market_prices.append(p_val)
         except Exception:
@@ -170,24 +161,21 @@ def verify_market_price(title, store_price, old_price, store_name):
     if market_prices:
         avg_market = int(sum(market_prices) / len(market_prices))
         min_market = min(market_prices)
-        # إذا كان السعر بعد الخصم أغلى أو مساوٍ لأقل سعر متاح في السوق، فالعرض وهمي!
         if store_price >= min_market * 0.97:
             print(f"❌ استبعاد عرض وهمي: [{title[:40]}] يباع بـ {store_price} بينما سعره بالسوق {min_market}", flush=True)
-            return False, avg_market, "عرض وهمي (السعر القديم مرفوع كذباً)"
+            return False, avg_market, "عرض وهمي"
         real_saving_pct = round(((min_market - store_price) / min_market) * 100)
-        return True, min_market, f"أقل من سعر السوق بـ {real_saving_pct}% (يباع بالسوق بـ {min_market:,} ج.م)"
+        return True, min_market, f"أقل من سعر السوق بـ {real_saving_pct}% (سعره بالسوق {min_market:,} ج.م)"
 
     return True, old_price, "خصم مباشر مؤكد على المتجر"
 
-# --- الماسح الشجري العميق لبيانات JSON (يشغل راية شوب، بي تك، نون، وكنز) ---
+# --- الماسح الشجري العميق لبيانات JSON ---
 def extract_from_json_tree(data, base_domain, found_list):
     if isinstance(data, dict):
-        # فحص ما إذا كان الكائن يمثل منتجاً
         name = data.get("name") or data.get("title") or data.get("product_name") or data.get("label")
         url_key = data.get("url") or data.get("url_key") or data.get("slug") or data.get("link") or data.get("sku")
 
         curr_p, old_p = 0, 0
-        # نمط Magento / GraphQL (راية شوب وبي تك)
         if "price_range" in data and isinstance(data["price_range"], dict):
             min_p = data["price_range"].get("minimum_price", {})
             curr_p = parse_price(min_p.get("final_price", {}).get("value"))
@@ -239,14 +227,13 @@ def universal_extract(html, base_domain):
 
     # 1. استخراج من جميع سكربتات JSON و Next.js و LD+JSON داخل الصفحة
     for script in soup.find_all("script"):
-         stext = script.string or ""
+        stext = script.string or ""
         if len(stext) > 100 and ("price" in stext.lower() or "special" in stext.lower()):
             try:
                 if script.get("id") == "__NEXT_DATA__" or script.get("type") == "application/ld+json":
                     jdata = json.loads(stext)
                     extract_from_json_tree(jdata, base_domain, deals)
                 else:
-                    # التقاط كائنات JSON المضمنة داخل سكربتات الجافاسكربت
                     for m in re.finditer(r'\{[^{}]*"(?:final_price|special_price|sale_price)"[^{}]*\}', stext):
                         try:
                             extract_from_json_tree(json.loads(m.group(0)), base_domain, deals)
@@ -258,7 +245,6 @@ def universal_extract(html, base_domain):
     # 2. استخراج من بطاقات HTML القياسية
     cards = soup.find_all(["li", "div", "article"], class_=re.compile(r"product-item|product-card|productCard|prd|grid-item|product-layout|item", re.I))
     for card in cards:
-        card_text = card.get_text(" ", strip=True)
         link_el = card.find("a", href=True)
         if not link_el:
             continue
@@ -299,7 +285,6 @@ def dispatch_verified_deals(store, deals_list):
     global total_deals_sent
     if not deals_list:
         return
-    # ترتيب حسب الأقوى خصماً ثم التوفير المالي الأكبر
     deals_list.sort(key=lambda x: (x["discount"], x["old_p"] - x["curr_p"]), reverse=True)
     sent_count = 0
 
@@ -310,7 +295,6 @@ def dispatch_verified_deals(store, deals_list):
         if d["link"] in alerted_links or (norm_t and norm_t in seen_titles):
             continue
 
-        # التحقق من مصداقية السعر ومقارنته بالسوق المصري
         is_real, ref_price, market_note = verify_market_price(d["title"], d["curr_p"], d["old_p"], store)
         if not is_real:
             continue
@@ -398,7 +382,6 @@ def scan_noon():
 def scan_dubai_phone():
     store = "دبي فون (Dubai Phone)"
     deals = []
-    # محاولة سحب العروض مباشرة من واجهة بيانات المتجر الخلفية لتفادي 429
     api_url = "https://www.dubaiphone.net/wp-json/wc/store/v1/products?on_sale=true&per_page=30"
     raw = smart_fetch(api_url, store, allow_proxy=True)
     if raw:
@@ -411,7 +394,6 @@ def scan_dubai_phone():
                     prices = it.get("prices", {})
                     curr_p = parse_price(prices.get("sale_price") or prices.get("price"))
                     old_p = parse_price(prices.get("regular_price"))
-                    # تحويل القروش في WooCommerce إن كانت مضروبة في 100
                     if curr_p > 500000 and old_p > 500000:
                         curr_p, old_p = curr_p // 100, old_p // 100
                     if old_p > curr_p >= MIN_PRODUCT_PRICE:
@@ -427,7 +409,7 @@ def scan_dubai_phone():
             deals.extend(universal_extract(html, "https://www.dubaiphone.net"))
     dispatch_verified_deals(store, deals)
 
-# --- 4. باقي المتاجر المصرية (مع دعم البوابات الوسيطة والـ JSON العميق) ---
+# --- 4. باقي المتاجر المصرية ---
 STORES_CONFIG = [
     {
         "name": "جوميا مصر (Jumia)",
