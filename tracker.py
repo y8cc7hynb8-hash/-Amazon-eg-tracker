@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار عروض المتاجر المصرية — V8
+رادار عروض المتاجر المصرية — V9
 ================================
 اللي اتغيّر عن V7:
   1) ذاكرة أسعار (history.json): كل منتج بيتسجّل سعره في كل جولة، والعرض بيتحكم عليه من التاريخ الفعلي
@@ -23,7 +23,7 @@
   JINA_API_KEY              مفتاح Jina Reader (اختياري)
   MIN_DISCOUNT (20)  MAX_REALISTIC_DISC (70)  MIN_REAL_DROP (12)  DROP_ALERT (15)  MIN_PRODUCT_PRICE (200)
   MAX_DEALS_PER_STORE (6)  MAX_DEALS_PER_RUN (30)  MAX_UNVERIFIED_PER_STORE (3)
-  SEND_UNVERIFIED=1  SEND_FLAGGED=0  TRACK_ALL=1  CROSS_STORE=1  USE_BROWSER=1
+  SEND_UNVERIFIED=0  SEND_FLAGGED=0  TRACK_ALL=1  CROSS_STORE=1  USE_BROWSER=1
   ONLY_STORES=jumia,noon    تشغيل متاجر معينة بس (للتجربة)
   SUMMARY_MODE=auto|always|never
   COMMIT_STATE=1            (بديل) يحفظ الذاكرة في الريبو نفسه بدل الـ data branch
@@ -133,11 +133,11 @@ REALERT_HOURS = _env_int("REALERT_HOURS", 72)
 
 HISTORY_WINDOW_DAYS = _env_int("HISTORY_WINDOW_DAYS", 60)  # نافذة حساب "السعر المعتاد"
 HISTORY_KEEP_DAYS = _env_int("HISTORY_KEEP_DAYS", 90)      # مدة الاحتفاظ بنقاط الأسعار
-MIN_HISTORY_DAYS = _env_int("MIN_HISTORY_DAYS", 4)         # أيام متابعة تكفي للحكم "وهمي"
-STATIC_MIN_DAYS = _env_int("STATIC_MIN_DAYS", 7)           # أيام ثبات السعر عشان نقول الخصم شكلي
+MIN_HISTORY_DAYS = _env_int("MIN_HISTORY_DAYS", 14)        # الحد الأدنى لعمر السجل قبل تأكيد الخصم
+STATIC_MIN_DAYS = _env_int("STATIC_MIN_DAYS", 14)          # مدة الرصد قبل تصنيف السعر الثابت
 CROSS_MAX_AGE_H = 48
 
-SEND_UNVERIFIED = _env_flag("SEND_UNVERIFIED", True)
+SEND_UNVERIFIED = _env_flag("SEND_UNVERIFIED", False)
 SEND_FLAGGED = _env_flag("SEND_FLAGGED", False)
 TRACK_ALL = _env_flag("TRACK_ALL", True)
 CROSS_STORE = _env_flag("CROSS_STORE", True)
@@ -282,14 +282,19 @@ def clean_link(url: str) -> str:
 
 
 def item_key(link: str, title: str) -> str:
-    """مفتاح ثابت للمنتج: مسار اللينك لو محدد، وإلا الاسم."""
+    """مفتاح منتج يحتفظ بمعرّفات النسخ المهمة ويتجاهل معاملات التتبع."""
     if link:
         try:
-            path = urllib.parse.urlsplit(link).path.rstrip("/")
+            u = urllib.parse.urlsplit(link)
+            path = u.path.rstrip("/")
+            # بعض المتاجر تضع variant/sku داخل query؛ نحتفظ بالمعرّفات فقط.
+            keep = {"variant", "sku", "skuId", "productId", "id", "item", "offer"}
+            q = sorted((k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+                       if k in keep and v)
+            if len(path) > 1:
+                return path + ("?" + urllib.parse.urlencode(q) if q else "")
         except ValueError:
-            path = ""
-        if len(path) > 1:
-            return path
+            pass
     return "t:" + norm_title(title)
 
 
@@ -1650,7 +1655,8 @@ class History:
 
     def prune(self, now: int) -> None:
         keep_after = now - HISTORY_KEEP_DAYS * DAY
-        for pid in [p for p, r in self.products.items() if r.get("ls", 0) < now - 45 * DAY]:
+        # احتفظ بالمنتج طوال HISTORY_KEEP_DAYS؛ لا تستخدم مهلة ثابتة أقصر من الإعداد.
+        for pid in [p for p, r in self.products.items() if r.get("ls", 0) < keep_after]:
             self.products.pop(pid, None)
         for rec in self.products.values():
             pts = rec["p"]
@@ -1694,68 +1700,81 @@ class Verdict:
 
 
 def assess(it: Item, rec: dict, now: int) -> Verdict:
-    """يحكم على العرض من تاريخ السعر الفعلي."""
+    """تقييم تحفظي: لا يصنّف الخصم مؤكداً إلا بسجل زمني كافٍ."""
     v = Verdict()
-    pts = list(rec.get("p") or [])
+    raw_pts = rec.get("p") or []
+    pts = []
+    for point in raw_pts:
+        try:
+            ts, price = int(point[0]), int(point[1])
+            if price >= MIN_PRODUCT_PRICE and ts > 0:
+                pts.append((ts, price))
+        except (TypeError, ValueError, IndexError):
+            continue
+    pts.sort(key=lambda x: x[0])
     if not pts:
         return v
-    cur = it.price
+
+    cur = int(it.price)
     if pts[-1][1] != cur:
-        pts.append([now, cur])
+        pts.append((now, cur))
     adv = it.discount
-    v.hist_days = max(0.0, (now - rec.get("f", pts[0][0])) / DAY)
+    first_ts = int(rec.get("f", pts[0][0]))
+    v.hist_days = max(0.0, (now - first_ts) / DAY)
+
     i = len(pts) - 1
     while i > 0 and pts[i - 1][1] == cur:
         i -= 1
     v.at_price_days = max(0.0, (now - pts[i][0]) / DAY)
     before = pts[:i]
-    if not before:                                   # السعر ما اتغيّرش طول فترة المتابعة
-        if adv >= MIN_DISCOUNT and v.hist_days >= STATIC_MIN_DAYS:
-            v.code = "STATIC"
-            v.notes.append("السعر ثابت من %d يوم متابعة — الخصم المعلن شكلي" % round(v.hist_days))
-        elif adv:
-            v.notes.append("لسه بجمع تاريخ السعر (%d يوم) — الخصم حسب إعلان المتجر بس" % round(v.hist_days))
-        return v
-    since = now - HISTORY_WINDOW_DAYS * DAY
-    daily: Dict[int, int] = {}
-    for ts, p in before:                             # آخر سعر في كل يوم
-        if ts >= since:
-            daily[int(ts // DAY)] = p
-    prices = list(daily.values()) or [p for _, p in before[-5:]]
-    v.ref = int(statistics.median(prices))
-    v.low = min(p for _, p in before)
-    v.high = max(p for _, p in before)
-    v.real = round((v.ref - cur) / v.ref * 100) if v.ref else 0
-    n_days = len(daily)
-    v.conf = 2 if (v.hist_days >= 10 and n_days >= 5) else 1 if (v.hist_days >= MIN_HISTORY_DAYS and n_days >= 2) else 0
-    prev_price = before[-1][1]
-    pumped = bool(v.conf >= 1 and v.ref and prev_price >= v.ref * 1.12 and cur >= v.ref * 0.97)
 
-    if v.real >= MIN_REAL_DROP:
-        v.code = "LOW" if (cur <= v.low and v.hist_days >= 7) else "REAL"
-        if adv and adv - v.real >= 15 and v.conf >= 1:
-            v.notes.append("المتجر معلن خصم %d%% لكن النزول الفعلي %d%% بس" % (adv, v.real))
-        if it.old and v.high and it.old > v.high * 1.08 and v.hist_days >= 10:
-            v.notes.append("السعر القديم المعلن (%s) أعلى من أعلى سعر اتسجّل (%s)" % (money(it.old), money(v.high)))
-        if v.at_price_days >= 10:
-            v.notes.append("العرض شغال من %d يوم" % round(v.at_price_days))
-        if v.conf == 0:
-            v.notes.append("بيانات قليلة (%d يوم متابعة)" % round(v.hist_days))
-    elif pumped and adv >= MIN_DISCOUNT:
+    # احسب نقاطاً يومية مستقلة قبل السعر الحالي فقط، لتجنب تضخيم الثقة بكثرة الجولات.
+    since = now - HISTORY_WINDOW_DAYS * DAY
+    daily = {}
+    for ts, price in before:
+        if ts >= since:
+            daily[int(ts // DAY)] = price
+    prices = list(daily.values())
+    v.conf = 2 if (v.hist_days >= MIN_HISTORY_DAYS and len(daily) >= 7) else (
+        1 if (v.hist_days >= 7 and len(daily) >= 3) else 0)
+
+    if not before:
+        if adv:
+            v.code = "NEW"
+            v.notes.append("لا يوجد سعر سابق مستقل يمكن المقارنة به؛ الخصم غير مؤكد")
+        return v
+
+    # استبعد الأسعار الشاذة المرتفعة جداً من خط الأساس باستخدام الوسيط.
+    if not prices:
+        prices = [price for _, price in before[-5:]]
+    v.ref = int(statistics.median(prices))
+    v.low = min(price for _, price in before)
+    v.high = max(price for _, price in before)
+    v.real = max(0, round((v.ref - cur) / v.ref * 100)) if v.ref else 0
+    prev_price = before[-1][1]
+    pumped = bool(v.ref and prev_price >= v.ref * 1.12 and cur >= v.ref * 0.97)
+
+    if pumped and adv >= MIN_DISCOUNT:
         v.code = "PUMP"
-        v.notes.append("السعر اترفع لـ %s وبعدين رجع للمعتاد %s — الخصم المعلن محسوب من السعر المرفوع"
-                       % (money(prev_price), money(v.ref)))
-    elif v.conf >= 1 and adv >= MIN_DISCOUNT:
-        if v.real < 3:
-            v.code = "FAKE"
-            v.notes.append("الخصم المعلن %d%% لكن السعر مش أقل من المعتاد (%s)" % (adv, money(v.ref)))
-        else:
-            v.code = "MINOR"
-    elif v.conf >= 1 and v.real >= 3:
-        v.code = "MINOR"
-    elif adv:
+        v.notes.append("اشتباه رفع السعر قبل الخصم: السعر السابق أعلى بوضوح من خط الأساس")
+    elif v.conf < 2:
         v.code = "NEW"
-        v.notes.append("لسه بجمع تاريخ السعر (%d يوم) — الخصم حسب إعلان المتجر بس" % round(v.hist_days))
+        v.notes.append("تاريخ السعر غير كافٍ للتأكيد؛ يلزم 14 يوماً و7 أيام سعرية مستقلة على الأقل")
+        if v.real:
+            v.notes.append("الانخفاض المبدئي عن الوسيط المسجل %d%% لكنه غير مؤكد" % v.real)
+    elif v.real >= MIN_REAL_DROP:
+        v.code = "LOW" if (cur <= v.low and v.hist_days >= MIN_HISTORY_DAYS) else "REAL"
+        if adv and adv - v.real >= 15:
+            v.notes.append("المتجر يعلن خصم %d%% لكن الانخفاض عن السعر المعتاد %d%% فقط" % (adv, v.real))
+        if it.old and v.high and it.old > v.high * 1.08:
+            v.notes.append("السعر القديم المعلن أعلى من أعلى سعر موثق بأكثر من 8%%")
+        if v.at_price_days >= 10:
+            v.notes.append("السعر الحالي مستمر منذ %d يوم" % round(v.at_price_days))
+    elif adv >= MIN_DISCOUNT:
+        v.code = "FAKE"
+        v.notes.append("الخصم المعلن لا يقابله انخفاض حقيقي عن السعر التاريخي")
+    elif v.real >= 3:
+        v.code = "MINOR"
     else:
         v.code = "FLAT"
     return v
@@ -2185,7 +2204,7 @@ def evaluate(reports: List[StoreReport], hist: History, now: int) -> List[Item]:
             v = assess(it, rec, now)
             it.verdict = v
             if adv_ok:
-                if v.code in ("REAL", "LOW"):
+                if v.code in ("REAL", "LOW") and v.conf >= 2:
                     rep.real += 1
                     cands.append(it)
                 elif v.code in ("FAKE", "STATIC", "PUMP"):
@@ -2197,7 +2216,7 @@ def evaluate(reports: List[StoreReport], hist: History, now: int) -> List[Item]:
                     if SEND_UNVERIFIED:
                         cands.append(it)
             elif (TRACK_ALL and v.code in ("REAL", "LOW") and v.real >= DROP_ALERT
-                  and v.conf >= 1 and rec.get("c", 1) >= 2):
+                  and v.conf >= 2 and rec.get("c", 1) >= 2):
                 it.source += "+drop"             # نزل فعلاً عن المعتاد من غير ما المتجر يعلن خصم
                 rep.real += 1
                 cands.append(it)
@@ -2223,6 +2242,13 @@ def dispatch(picked: List[Item], state: Dict[str, dict], reports: List[StoreRepo
     by_sid = {r.sid: r for r in reports}
     sent = 0
     for it in picked:
+        # دفاع إضافي: العروض غير المؤكدة/ضعيفة الثقة لا تصل للقناة الرئيسية افتراضياً.
+        if it.verdict.code in ("REAL", "LOW") and it.verdict.conf < 2:
+            continue
+        if it.verdict.code == "NEW" and not SEND_UNVERIFIED:
+            continue
+        if it.verdict.code in ("FAKE", "STATIC", "PUMP") and not SEND_FLAGGED:
+            continue
         ok, tag = should_send(state, it.pid, it.price)
         if not ok:
             continue
@@ -2296,7 +2322,7 @@ def main() -> None:
     t0 = time.time()
     now = int(t0)
     deadline = t0 + MAX_RUNTIME_MIN * 60
-    log("--- بدء الرادار الذكي الشامل (V8) ---")
+    log("--- بدء الرادار الذكي الشامل (V9) ---")
     log("curl_cffi=%s cloudscraper=%s browser=%s proxy=%s gateways=%s data=%s"
         % (HAS_CFFI, HAS_CLOUDSCRAPER, USE_BROWSER, bool(PROXY_URL),
            [g["name"] for g in GATEWAYS if os.environ.get(g["env"])] or "-", DATA_DIR))
