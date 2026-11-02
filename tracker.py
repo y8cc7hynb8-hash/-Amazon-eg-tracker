@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, sys, time, json, re, random, html as htmllib, subprocess, traceback, urllib.parse
+from collections import defaultdict
 
-print("⚡ بدء تشغيل رادار الصفقات الذكي (الإصدار V12)...", flush=True)
+print("⚡ بدء تشغيل رادار الصفقات الذكي (الإصدار V12.1)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,7 +27,7 @@ MIN_DISCOUNT = int(os.environ.get("MIN_DISCOUNT", 15))
 MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 75))
 MIN_PRODUCT_PRICE = int(os.environ.get("MIN_PRODUCT_PRICE", 200))
 MAX_DEALS_PER_STORE = int(os.environ.get("MAX_DEALS_PER_STORE", 5))
-REALERT_HOURS = 96  # منع تكرار نفس العرض لمدة 4 أيام إلا لو نزل سعره أكثر
+REALERT_HOURS = 96
 
 DATA_DIR = "data" if os.path.isdir("data") else "."
 STATE_FILE = os.path.join(DATA_DIR, "sent_deals.json")
@@ -66,7 +67,6 @@ def send_telegram(message: str, use_html: bool = False) -> bool:
     return False
 
 def parse_price(value) -> int:
-    """قارئ أسعار متطور يعالج الكسور العشرية بالفاصلة أو النقطة (مثل 5399,00 أو 5,399.00) دون تضخيم الرقم."""
     if value is None or isinstance(value, bool):
         return 0
     if isinstance(value, (int, float)):
@@ -75,9 +75,7 @@ def parse_price(value) -> int:
     if any(w in text.lower() for w in INSTALLMENT_WORDS):
         return 0
     text = text.translate(_TRANS).replace("\u00a0", " ")
-    # إزالة الكسور العشرية سواء كانت بنقطة (.00) أو فاصلة (,00) في نهاية الرقم
     text = re.sub(r"[.,]\d{1,2}(?!\d)", " ", text)
-    # إزالة نقاط اختصار العملة (ج.م.)
     text = re.sub(r"ج\s*\.?\s*م\s*\.?", " ", text)
     for m in re.findall(r"\d{1,3}(?:,\d{3})+|\d+", text):
         v = int(m.replace(",", ""))
@@ -119,7 +117,6 @@ def clean_path_key(url: str) -> str:
         return url
 
 def is_real_block(text: str, status: int) -> bool:
-    """كشف دقيق للحظر يفحص عنوان الصفحة <title> فقط ولا ينخدع بكلمات الجافاسكربت في الصفحات السليمة."""
     if not text or len(text) < 900:
         return True
     if status in (403, 429, 503) and len(text) < 25000:
@@ -145,7 +142,6 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
         "Referer": home
     }
 
-    # 1. محاولة الاتصال المباشر ببصمات متصفح حقيقية
     if HAS_CFFI:
         for fp in ("chrome120", "safari17_0"):
             try:
@@ -161,7 +157,6 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
             except Exception:
                 pass
 
-    # 2. محاولة Cloudscraper
     if scraper and not expect_json:
         try:
             r = scraper.get(url, headers=headers, timeout=20)
@@ -171,7 +166,6 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
         except Exception:
             pass
 
-    # 3. البوابات الوسيطة المجانية لتجاوز حظر IP جيتهاب (جوميا / دبي فون)
     enc = urllib.parse.quote(url, safe="")
     proxies = [
         ("AllOrigins-JSON", f"https://api.allorigins.win/get?url={enc}"),
@@ -208,7 +202,6 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
     log(f"   ⛔ تعذر فتح الرابط في [{store_name}]")
     return ""
 
-# --- استخراج المنتجات من شجرة JSON ---
 _NAME_KEYS = ("name", "title", "product_name", "productName", "name_ar", "title_ar", "label")
 _CUR_KEYS = ("sale_price", "salePrice", "special_price", "specialPrice", "final_price", "finalPrice", "offer_price", "discounted_price", "current_price", "selling_price")
 _OLD_KEYS = ("was_price", "wasPrice", "old_price", "oldPrice", "regular_price", "regularPrice", "list_price", "original_price", "compare_at_price", "strike_price", "price_before")
@@ -292,12 +285,9 @@ def extract_json_tree(root, base_domain: str, is_noon: bool = False) -> list:
                     stack.append(v)
     return deals
 
-# --- صائد الكروت العام من الـ DOM (يعمل مع نون، راية، بي تك، جوميا، دريم 2000، 2B، رنين، كنز) ---
 def extract_universal_dom(soup, base_domain: str) -> list:
     deals = []
     seen = set()
-
-    # البحث عن كل روابط المنتجات المحتملة في الصفحة وصعوداً لحاوية الكارت
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if not href or href.startswith("#") or "javascript:" in href:
@@ -306,14 +296,12 @@ def extract_universal_dom(soup, base_domain: str) -> list:
             continue
         link = urllib.parse.urljoin(base_domain, href)
 
-        # الصعود للبحث عن حاوية الكارت التي تضم السعر والاسم معاً
         card = a
         for _ in range(5):
             if len(card.get_text(" ", strip=True)) >= 25 or card.parent is None:
                 break
             card = card.parent
 
-        # لو كان الرابط نفسه داخل كارت أكبر، نأخذ الكارت الأب
         if card.parent and card.parent.name in ("li", "article", "div") and len(card.parent.get_text(" ", strip=True)) < 500:
             card = card.parent
 
@@ -321,7 +309,6 @@ def extract_universal_dom(soup, base_domain: str) -> list:
         if len(card_text) < 15 or len(card_text) > 700:
             continue
 
-        # استخراج اسم المنتج
         t_el = card.find(["h2", "h3", "h4", "strong"], class_=re.compile(r"name|title|link", re.I)) or card.find(["h2", "h3", "h4"])
         title = clean_title(t_el.get_text(" ", strip=True)) if t_el else clean_title(a.get("title") or "")
         if len(title) < 6:
@@ -329,13 +316,11 @@ def extract_universal_dom(soup, base_domain: str) -> list:
             if img and len(img["alt"].strip()) >= 6:
                 title = clean_title(img["alt"])
         if len(title) < 6:
-            # استخراج العنوان من نص الرابط بعد حذف الأرقام والأسعار
             raw_t = re.sub(r"\d+(?:[.,]\d+)?\s*(?:ج\.?م\.?|جنيه|EGP|%)", "", a.get_text(" ", strip=True), flags=re.I)
             title = clean_title(raw_t)
         if len(title) < 6 or any(w in title.lower() for w in INSTALLMENT_WORDS):
             continue
 
-        # البحث عن السعر المشطوب والسعر الحالي
         sp_el = card.find(attrs={"data-price-type": "finalPrice"}) or card.find(class_=re.compile(r"special-price|finalPrice|price-new|prc|current|amount|sellingPrice", re.I)) or card.find("ins")
         old_el = card.find(attrs={"data-price-type": "oldPrice"}) or card.find(class_=re.compile(r"old-price|oldPrice|price-old|old|was|regular|strike", re.I)) or card.find(["del", "s", "strike"])
 
@@ -343,9 +328,7 @@ def extract_universal_dom(soup, base_domain: str) -> list:
         old = parse_price(old_el.get_text()) if old_el else 0
 
         if not cur or not old:
-            # جمع كل الأسعار المكتوبة داخل الكارت
             clean_card_txt = card_text.translate(_TRANS)
-            # إزالة الكسور العشرية (,00 أو .00)
             clean_card_txt = re.sub(r"[.,]\d{1,2}(?!\d)", " ", clean_card_txt)
             price_matches = re.findall(r"(?:(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:ج\.?م|جنيه|جنية|EGP)|(?:ج\.?م|جنيه|جنية|EGP)\s*(\d{1,3}(?:,\d{3})+|\d{3,6}))", clean_card_txt, re.I)
             nums = []
@@ -358,7 +341,6 @@ def extract_universal_dom(soup, base_domain: str) -> list:
             elif len(nums) == 1 and not cur:
                 cur = nums[0]
 
-        # لو وجدنا السعر الحالي ومعه شارة خصم مئوية (%) نحسب السعر القديم
         if cur >= MIN_PRODUCT_PRICE and not old:
             m_pct = _BADGE_PCT_RE.search(card_text.translate(_TRANS))
             if m_pct:
@@ -404,7 +386,6 @@ def extract_all_deals(html_text: str, page_url: str, base_domain: str, is_amazon
                     deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": f"https://www.amazon.eg/dp/{asin}"})
         return deals
 
-    # 1. استخراج من سكربتات JSON و Next.js App Router (RSC)
     for s in soup.find_all("script"):
         txt = (s.string or s.get_text() or "").strip()
         if len(txt) < 80:
@@ -415,7 +396,6 @@ def extract_all_deals(html_text: str, page_url: str, base_domain: str, is_amazon
             except Exception:
                 pass
         elif "__next_f.push" in txt or "final_price" in txt or "special_price" in txt or "sale_price" in txt:
-            # فك نصوص Next.js RSC المهربة
             unescaped = txt.replace('\\"', '"').replace("\\\\", "\\")
             for m in re.finditer(r'\{[^{}]{20,1200}\}', unescaped):
                 chunk = m.group(0)
@@ -425,7 +405,6 @@ def extract_all_deals(html_text: str, page_url: str, base_domain: str, is_amazon
                     except Exception:
                         pass
 
-    # 2. الاستخراج الشامل من كروت الـ DOM
     deals.extend(extract_universal_dom(soup, base_domain))
     return deals
 
@@ -436,4 +415,193 @@ STORES = [
          "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE",
          "https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901098031&language=ar_AE",
      ]},
-    {"id": "noon", "name": "نون مصر (Noon)", "doma
+    {"id": "noon", "name": "نون مصر (Noon)", "domain": "https://www.noon.com", "noon": True,
+     "urls": [
+         "https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc",
+         "https://www.noon.com/egypt-ar/home-and-kitchen/?sort[by]=discount&sort[dir]=desc",
+     ]},
+    {"id": "dubaiphone", "name": "دبي فون (Dubai Phone)", "domain": "https://www.dubaiphone.net",
+     "api": "https://www.dubaiphone.net/wp-json/wc/store/v1/products?on_sale=true&per_page=80",
+     "urls": ["https://www.dubaiphone.net/ar/"]},
+    {"id": "jumia", "name": "جوميا مصر (Jumia)", "domain": "https://www.jumia.com.eg",
+     "urls": [
+         "https://www.jumia.com.eg/ar/flash-sales/",
+         "https://www.jumia.com.eg/ar/phones-tablets/?sort=discount",
+         "https://www.jumia.com.eg/ar/electronics/?sort=discount",
+     ]},
+    {"id": "raya", "name": "راية شوب (Raya Shop)", "domain": "https://www.rayashop.com",
+     "urls": [
+         "https://www.rayashop.com/ar/deals",
+         "https://www.rayashop.com/ar/mobiles-tablets",
+         "https://www.rayashop.com/ar/home-appliances",
+     ]},
+    {"id": "btech", "name": "بي تك (B.Tech)", "domain": "https://btech.com",
+     "urls": [
+         "https://btech.com/ar/daily-deals",
+         "https://btech.com/ar/mobyilat.html",
+         "https://btech.com/ar/tv-home-theater.html",
+         "https://btech.com/ar/",
+     ]},
+    {"id": "2b", "name": "2B Egypt", "domain": "https://2b.com.eg",
+     "urls": ["https://2b.com.eg/ar/deals.html", "https://2b.com.eg/ar/computers.html"]},
+    {"id": "raneen", "name": "رنين (Raneen)", "domain": "https://www.raneen.com",
+     "urls": ["https://www.raneen.com/ar/deals", "https://www.raneen.com/ar/"]},
+    {"id": "dream2000", "name": "دريم 2000 (Dream 2000)", "domain": "https://dream2000.com",
+     "urls": [
+         "https://dream2000.com/offers.html",
+         "https://dream2000.com/home-appliances.html",
+         "https://dream2000.com/mobiles.html",
+         "https://dream2000.com/",
+     ]},
+    {"id": "kenzz", "name": "كنز (Kenzz)", "domain": "https://kenzz.com",
+     "urls": ["https://kenzz.com/ar"]},
+]
+
+def load_json(path: str) -> dict:
+    for p in (path, os.path.basename(path), os.path.join("data", os.path.basename(path))):
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+def save_json(path: str, data: dict):
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    except Exception as e:
+        log(f"⚠ تعذر حفظ {path}: {e}")
+
+def commit_files():
+    try:
+        subprocess.run(["git", "config", "user.name", "deals-radar[bot]"], check=False)
+        subprocess.run(["git", "config", "user.email", "deals-radar@users.noreply.github.com"], check=False)
+        for f in (STATE_FILE, HISTORY_FILE, "sent_deals.json", "history.json"):
+            if os.path.exists(f):
+                subprocess.run(["git", "add", f], check=False)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], check=False).returncode != 0:
+            subprocess.run(["git", "commit", "-m", "chore: update deals memory [skip ci]"], check=False)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
+            subprocess.run(["git", "push"], check=False)
+            log("💾 تم حفظ الذاكرة في GitHub بنجاح.")
+    except Exception as e:
+        log(f"⚠ خطأ حفظ الذاكرة: {e}")
+
+def was_recently_sent(state: dict, sid: str, title: str, link: str, price: int, now: int) -> bool:
+    k_title = f"{sid}|{norm_title(title)}"
+    k_path = f"{sid}|{clean_path_key(link)}"
+    for k in (k_title, k_path, clean_path_key(link)):
+        rec = state.get(k)
+        if isinstance(rec, dict):
+            age_h = (now - rec.get("ts", 0)) / 3600.0
+            if age_h < REALERT_HOURS and price >= rec.get("price", price) * 0.95:
+                return True
+    return False
+
+def main():
+    t0 = time.time()
+    now = int(t0)
+    log("🚀 بدء الفحص الشامل للمتاجر المصرية (V12.1)...")
+    state = load_json(STATE_FILE)
+    history = load_json(HISTORY_FILE)
+
+    summary_lines = ["📊 <b>ملخص جولة الرادار (V12.1)</b>", ""]
+    total_sent = 0
+
+    for st in STORES:
+        sname = st["name"]
+        sid = st["id"]
+        found_deals = []
+        opened = False
+
+        if st.get("api"):
+            raw = smart_fetch(st["api"], sname, expect_json=True)
+            if raw:
+                try:
+                    found_deals.extend(extract_json_tree(json.loads(raw), st["domain"]))
+                    opened = True
+                except Exception:
+                    pass
+
+        for u in st["urls"]:
+            html_txt = smart_fetch(u, sname)
+            if html_txt:
+                opened = True
+                extracted = extract_all_deals(
+                    html_txt, u, st["domain"],
+                    is_amazon=bool(st.get("amazon")),
+                    is_noon=bool(st.get("noon"))
+                )
+                found_deals.extend(extracted)
+            time.sleep(random.uniform(0.8, 1.5))
+
+        unique_deals = {}
+        for d in found_deals:
+            k = norm_title(d["title"])
+            if k and (k not in unique_deals or d["discount"] > unique_deals[k]["discount"]):
+                unique_deals[k] = d
+
+        ordered = sorted(unique_deals.values(), key=lambda x: (x["discount"], x["old"] - x["price"]), reverse=True)
+        sent_store = 0
+
+        for d in ordered:
+            if sent_store >= MAX_DEALS_PER_STORE:
+                break
+            if was_recently_sent(state, sid, d["title"], d["link"], d["price"], now):
+                continue
+
+            pid_title = f"{sid}|{norm_title(d['title'])}"
+            pid_path = f"{sid}|{clean_path_key(d['link'])}"
+
+            h_rec = history.get(pid_title) or history.get(pid_path) or {"prices": []}
+            h_prices = h_rec.get("prices", []) if isinstance(h_rec, dict) else []
+            status_tag = "🔥 <b>صفقة مرصودة</b>"
+            if h_prices:
+                if d["price"] < min(h_prices):
+                    status_tag = "🏆 <b>أقل سعر تاريخي مسجل!</b>"
+                elif d["price"] <= sum(h_prices) / len(h_prices) * 0.90:
+                    status_tag = "✅ <b>خصم حقيقي مؤكد تاريخياً</b>"
+            h_prices.append(d["price"])
+            history[pid_title] = {"prices": h_prices[-30:], "ts": now}
+
+            saving = d["old"] - d["price"]
+            msg = (
+                f"{status_tag} — {htmllib.escape(sname)}\n"
+                f"📦 {htmllib.escape(d['title'])}\n"
+                f"💰 السعر الحالي: <b>{d['price']:,} ج.م</b>\n"
+                f"🏷 السعر السابق: {d['old']:,} ج.م (خصم {d['discount']}% — توفير {saving:,} ج.م)\n"
+                f"🔗 {d['link']}"
+            )
+            if send_telegram(msg, use_html=True):
+                state[pid_title] = {"price": d["price"], "ts": now}
+                state[pid_path] = {"price": d["price"], "ts": now}
+                sent_store += 1
+                total_sent += 1
+                time.sleep(1.1)
+
+        if opened:
+            summary_lines.append(f"✅ {sname}: وُجد {len(ordered)} عرض | أُرسل {sent_store}")
+        else:
+            summary_lines.append(f"❌ {sname}: محجوب")
+
+    save_json(STATE_FILE, state)
+    save_json(HISTORY_FILE, history)
+    commit_files()
+
+    elapsed = (time.time() - t0) / 60.0
+    summary_lines.append(f"\n⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي المرسل الجديد: <b>{total_sent}</b>")
+    summary_text = "\n".join(summary_lines)
+    log("--- انتهت الجولة بنجاح ---\n" + summary_text)
+    send_telegram(summary_text, use_html=True)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        tb = traceback.format_exc()
+        log(tb)
+        send_telegram("❌ خطأ في الرادار:\n" + tb[-1500:])
+        sys.exit(1)
