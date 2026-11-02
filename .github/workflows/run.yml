@@ -3,7 +3,10 @@ name: Run Amazon Tracker
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *' # يعمل تلقائياً كل ساعة
+    - cron: '0 * * * *'
+
+permissions:
+  contents: write
 
 jobs:
   track:
