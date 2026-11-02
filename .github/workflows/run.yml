@@ -47,4 +47,5 @@ jobs:
           MARKET_FETCH_PER_PRODUCT: '6'
           MARKET_MIN_OTHER_STORES: '2'
           MARKET_MIN_GAP_PCT: '3'
-        run: python -u egypt_deals_radar_v14.py
+        run: python -u tracker.py
+
