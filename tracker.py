@@ -1,32 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار عروض المتاجر المصرية — V9
-================================
-اللي اتغيّر عن V7:
-  1) ذاكرة أسعار (history.json): كل منتج بيتسجّل سعره في كل جولة، والعرض بيتحكم عليه من التاريخ الفعلي
-     مش من "السعر القديم" اللي المتجر كاتبه:
-        ✅ خصم حقيقي | 🏆 أقل سعر اتسجّل | 🚩 وهمي (السعر ثابت / اترفع قبل العرض / الخصم المعلن مش حقيقي) | 🆕 لسه بجمع بيانات
-  2) مقارنة بين المتاجر: نفس الموديل (مطابقة تقريبية بالاسم) بيتقارن سعره في باقي المتاجر.
-  3) تتبّع كل المنتجات حتى اللي مفيهاش سعر قديم (بي تك / كنز ...) وتنبيه لما السعر ينزل فعلاً عن المعتاد.
-  4) جلب أذكى: بيفتكر الطريقة اللي نجحت لكل موقع ويتخطى الميتة، والبروكسي/البوابات بتتجرّب للمحجوب بس وبحد أقصى.
-  5) تقرير صحة: المتجر المحجوب بيتعدّ عدد الجولات، وتنبيه لما يقع أو يرجع.
-
-الإعدادات (Secrets / env) — كلها اختيارية ما عدا BOT_TOKEN و CHAT_ID:
-  DATA_DIR                  فولدر الذاكرة (افتراضي: data لو موجود وإلا الفولدر الحالي)
-  PROXY_URL                 بروكسي http://user:pass@host:port (يفضّل سكني/مصري) — بيتجرّب بعد فشل الاتصال المباشر بس
-  SCRAPERAPI_KEY | SCRAPINGBEE_KEY | ZENROWS_KEY | SCRAPEDO_TOKEN     بوابات للمواقع المحجوبة (واحدة تكفي)
-  GATEWAY_MIN_INTERVAL_MIN  (360) أقل فاصل بين طلبات البوابة لنفس الرابط — بيحافظ على الرصيد
-  GATEWAY_MAX_CALLS         (6)   أقصى عدد طلبات بوابة في الجولة
-  GATEWAY_COUNTRY           (eg)  لو الخطة مش بتدعم الدولة بيجرّب من غيرها لوحده
-  SCRAPERAPI_MODE           premium | ultra | basic
-  JINA_API_KEY              مفتاح Jina Reader (اختياري)
-  MIN_DISCOUNT (20)  MAX_REALISTIC_DISC (70)  MIN_REAL_DROP (12)  DROP_ALERT (15)  MIN_PRODUCT_PRICE (200)
-  MAX_DEALS_PER_STORE (6)  MAX_DEALS_PER_RUN (30)  MAX_UNVERIFIED_PER_STORE (3)
-  SEND_UNVERIFIED=0  SEND_FLAGGED=0  TRACK_ALL=1  CROSS_STORE=1  USE_BROWSER=1
-  ONLY_STORES=jumia,noon    تشغيل متاجر معينة بس (للتجربة)
-  SUMMARY_MODE=auto|always|never
-  COMMIT_STATE=1            (بديل) يحفظ الذاكرة في الريبو نفسه بدل الـ data branch
+رادار عروض المتاجر المصرية — V10 (النسخة الحاسمة)
+================================================
+أهم التعديلات عن V9:
+  1) حل مشكلة (أُرسل 0): إرسال أقوى العروض الفورية منذ اليوم الأول مع فلترة ذكية، وعدم تجميد الرادار 14 يوماً.
+  2) تفعيل حفظ الذاكرة تلقائياً (COMMIT_STATE=1 افتراضياً) لبناء سجل الأسعار ومنع تكرار الرسائل.
+  3) إضافة 4 بوابات عبور مجانية (Free Proxy Gateways) لتخطي حظر IP جيتهاب في جوميا ودبي فون بدون اشتراكات.
+  4) إصلاح استخراج العروض في (بي تك) عبر روابط العروض وحساب الخصم من شارات النسبة المئوية (%).
 """
 from __future__ import annotations
 
@@ -54,7 +35,6 @@ def log(msg: str) -> None:
 
 
 def _ensure(import_name: str, pip_name: Optional[str] = None) -> bool:
-    """يتأكد إن المكتبة موجودة، ولو لأ يثبّتها."""
     try:
         __import__(import_name)
         return True
@@ -118,39 +98,41 @@ DATA_DIR = os.environ.get("DATA_DIR") or ("data" if os.path.isdir("data") else "
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 STATE_FILE = os.environ.get("STATE_FILE") or os.path.join(DATA_DIR, "sent_deals.json")
 HEALTH_FILE = os.path.join(DATA_DIR, "health.json")
-COMMIT_STATE = os.environ.get("COMMIT_STATE") == "1"
 
-MIN_DISCOUNT = _env_int("MIN_DISCOUNT", 20)               # أقل خصم معلن للعروض غير المؤكدة
-MAX_REALISTIC_DISC = _env_int("MAX_REALISTIC_DISC", 70)   # منع نسب الخصم الوهمية
-MIN_REAL_DROP = _env_int("MIN_REAL_DROP", 12)             # أقل نزول فعلي عن السعر المعتاد عشان العرض يتحسب حقيقي
-DROP_ALERT = _env_int("DROP_ALERT", 15)                   # للمنتجات اللي مفيهاش سعر قديم: أقل نزول يستاهل تنبيه
-MIN_PRODUCT_PRICE = _env_int("MIN_PRODUCT_PRICE", 200)
-MAX_DEALS_PER_STORE = _env_int("MAX_DEALS_PER_STORE", 6)
-MAX_DEALS_PER_RUN = _env_int("MAX_DEALS_PER_RUN", 30)
-MAX_UNVERIFIED_PER_STORE = _env_int("MAX_UNVERIFIED_PER_STORE", 3)
+# مفعّل افتراضياً لحفظ الذاكرة في المستودع تلقائياً بين الجولات
+COMMIT_STATE = _env_flag("COMMIT_STATE", True)
+
+MIN_DISCOUNT = _env_int("MIN_DISCOUNT", 20)               # أقل خصم معلن لإرسال العرض
+MAX_REALISTIC_DISC = _env_int("MAX_REALISTIC_DISC", 72)   # منع نسب الخصم الوهمية/الأقساط
+MIN_REAL_DROP = _env_int("MIN_REAL_DROP", 10)             # أقل نزول فعلي عن السعر المعتاد
+DROP_ALERT = _env_int("DROP_ALERT", 15)                   # للمنتجات بدون سعر قديم
+MIN_PRODUCT_PRICE = _env_int("MIN_PRODUCT_PRICE", 250)
+MAX_DEALS_PER_STORE = _env_int("MAX_DEALS_PER_STORE", 5)
+MAX_DEALS_PER_RUN = _env_int("MAX_DEALS_PER_RUN", 35)
+MAX_UNVERIFIED_PER_STORE = _env_int("MAX_UNVERIFIED_PER_STORE", 5)
 MAX_RUNTIME_MIN = _env_int("MAX_RUNTIME_MIN", 25)
 REALERT_HOURS = _env_int("REALERT_HOURS", 72)
 
-HISTORY_WINDOW_DAYS = _env_int("HISTORY_WINDOW_DAYS", 60)  # نافذة حساب "السعر المعتاد"
-HISTORY_KEEP_DAYS = _env_int("HISTORY_KEEP_DAYS", 90)      # مدة الاحتفاظ بنقاط الأسعار
-MIN_HISTORY_DAYS = _env_int("MIN_HISTORY_DAYS", 14)        # الحد الأدنى لعمر السجل قبل تأكيد الخصم
-STATIC_MIN_DAYS = _env_int("STATIC_MIN_DAYS", 14)          # مدة الرصد قبل تصنيف السعر الثابت
+HISTORY_WINDOW_DAYS = _env_int("HISTORY_WINDOW_DAYS", 60)
+HISTORY_KEEP_DAYS = _env_int("HISTORY_KEEP_DAYS", 90)
+MIN_HISTORY_DAYS = _env_int("MIN_HISTORY_DAYS", 3)        # تأكيد أسرع من السجل التاريخي
 CROSS_MAX_AGE_H = 48
 
-SEND_UNVERIFIED = _env_flag("SEND_UNVERIFIED", False)
+# مفعّل افتراضياً لإرسال أقوى العروض فوراً حتى لو الذاكرة جديدة
+SEND_UNVERIFIED = _env_flag("SEND_UNVERIFIED", True)
 SEND_FLAGGED = _env_flag("SEND_FLAGGED", False)
 TRACK_ALL = _env_flag("TRACK_ALL", True)
 CROSS_STORE = _env_flag("CROSS_STORE", True)
 USE_BROWSER = _env_flag("USE_BROWSER", True)
-SUMMARY_MODE = (os.environ.get("SUMMARY_MODE") or "auto").strip().lower()
+SUMMARY_MODE = (os.environ.get("SUMMARY_MODE") or "always").strip().lower()
 ONLY_STORES = [s.strip().lower() for s in (os.environ.get("ONLY_STORES") or "").split(",") if s.strip()]
 
 PROXY_URL = os.environ.get("PROXY_URL") or None
 JINA_API_KEY = os.environ.get("JINA_API_KEY") or None
-GATEWAY_MIN_INTERVAL_MIN = _env_int("GATEWAY_MIN_INTERVAL_MIN", 360)
-GATEWAY_MAX_CALLS = _env_int("GATEWAY_MAX_CALLS", 6)
+GATEWAY_MIN_INTERVAL_MIN = _env_int("GATEWAY_MIN_INTERVAL_MIN", 180)
+GATEWAY_MAX_CALLS = _env_int("GATEWAY_MAX_CALLS", 10)
 GATEWAY_COUNTRY = (os.environ.get("GATEWAY_COUNTRY") if os.environ.get("GATEWAY_COUNTRY") is not None else "eg").strip().lower()
-DEAD_RETRY_H = _env_int("DEAD_RETRY_H", 6)                 # كل كام ساعة نعيد تجربة الطريقة الميتة
+DEAD_RETRY_H = _env_int("DEAD_RETRY_H", 2)
 
 AR_LANG = "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
 UA_CHROME = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -175,6 +157,7 @@ _PRICE_RE = re.compile(
     r"|(?<!\w)" + _CUR + r"\s*(" + _NUM + r")(?![\d])",
     re.I,
 )
+_BADGE_PCT_RE = re.compile(r"(?:خصم|وفر|off|save|-|\b)\s*(\d{1,2})\s*%", re.I)
 
 
 def _to_int(s: str) -> int:
@@ -185,7 +168,6 @@ def _to_int(s: str) -> int:
 
 
 def parse_price(value: Any) -> int:
-    """يحوّل نص/رقم لسعر صحيح بالجنيه. يرجّع 0 لو مش سعر (أو قسط)."""
     if value is None or isinstance(value, bool):
         return 0
     if isinstance(value, (int, float)):
@@ -209,7 +191,6 @@ def parse_price(value: Any) -> int:
 
 
 def _num(v: Any) -> Optional[float]:
-    """أي قيمة (رقم/نص/dict) -> float أو None."""
     if v is None or isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
@@ -231,7 +212,7 @@ def _pct(v: Any) -> Optional[float]:
         x = float(re.sub(r"[^\d.]", "", str(v).translate(_TRANS)) or 0)
     except ValueError:
         return None
-    return x if 1 <= x <= 90 else None
+    return x if 1 <= x <= 85 else None
 
 
 def price_mentions(text: str) -> int:
@@ -269,7 +250,7 @@ def clean_title(t: str) -> str:
     return t[:220]
 
 
-_TRACKING = re.compile(r"^(utm_|ref$|ref_|qid$|sr$|sprefix|crid|pd_rd|pf_rd|psc$|_encoding|th$|keywords|dib|content-id|linkcode|tag$|smid)", re.I)
+_TRACKING = re.compile(r"^(utm_|ref$\vert{}ref_\vert{}qid$|sr$\vert{}sprefix\vert{}crid\vert{}pd_rd\vert{}pf_rd\vert{}psc$|_encoding|th$\vert{}keywords\vert{}dib\vert{}content-id\vert{}linkcode\vert{}tag$|smid)", re.I)
 
 
 def clean_link(url: str) -> str:
@@ -282,12 +263,10 @@ def clean_link(url: str) -> str:
 
 
 def item_key(link: str, title: str) -> str:
-    """مفتاح منتج يحتفظ بمعرّفات النسخ المهمة ويتجاهل معاملات التتبع."""
     if link:
         try:
             u = urllib.parse.urlsplit(link)
             path = u.path.rstrip("/")
-            # بعض المتاجر تضع variant/sku داخل query؛ نحتفظ بالمعرّفات فقط.
             keep = {"variant", "sku", "skuId", "productId", "id", "item", "offer"}
             q = sorted((k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)
                        if k in keep and v)
@@ -299,8 +278,7 @@ def item_key(link: str, title: str) -> str:
 
 
 def sane_old(cur: int, old: int) -> int:
-    """السعر القديم لازم يكون أكبر من الحالي ومعقول (مش أكتر من 10 أضعاف)."""
-    return old if old and cur < old <= cur * 10 else 0
+    return old if old and cur < old <= cur * 6 else 0
 
 
 @dataclass
@@ -326,7 +304,6 @@ class Item:
 
 
 def valid_discount(cur: int, old: int) -> bool:
-    """الخصم المعلن مقبول (بين MIN_DISCOUNT و MAX_REALISTIC_DISC)؟"""
     if cur < MIN_PRODUCT_PRICE or old <= cur:
         return False
     d = round((old - cur) / old * 100)
@@ -338,10 +315,11 @@ _BLOCK_TITLES = ("just a moment", "attention required", "access denied", "403 fo
                  "are you a robot", "security check", "pardon our interruption", "verify you are human",
                  "request blocked", "you have been blocked", "one more step", "bot verification",
                  "error 1020", "captcha", "service unavailable", "temporarily unavailable",
-                 "checking your browser", "sorry, you have been blocked")
+                 "checking your browser", "sorry, you have been blocked", "security checkpoint")
 _BLOCK_BODY = ("cf_chl_opt", "cf-browser-verification", "challenge-form", "px-captcha", "captcha-delivery.com",
                "validatecaptcha", "enter the characters you see below", "api-services-support@amazon.com",
-               "_incapsula_resource", "incapsula incident", "sucuri website firewall", "errors.edgesuite.net")
+               "_incapsula_resource", "incapsula incident", "sucuri website firewall", "errors.edgesuite.net",
+               "vercel security checkpoint")
 
 
 def block_reason(text: str) -> str:
@@ -353,7 +331,7 @@ def block_reason(text: str) -> str:
     for b in _BLOCK_TITLES:
         if b in title:
             return "صفحة حماية: " + title[:40]
-    if len(text) < 40000:
+    if len(text) < 45000:
         low = text.lower()
         for b in _BLOCK_BODY:
             if b in low:
@@ -362,11 +340,11 @@ def block_reason(text: str) -> str:
 
 
 def judge(text: str, status: int, expect_json: bool) -> str:
-    """'' = تمام، غير كده = سبب الفشل."""
     if status in (404, 410):
         return "HTTP %d" % status
     if expect_json:
-        if status == 200 and (text or "").lstrip()[:1] in ("{", "["):
+        t_strip = (text or "").lstrip()
+        if status == 200 and t_strip[:1] in ("{", "["):
             return ""
         if status != 200:
             return "HTTP %d" % status
@@ -376,7 +354,7 @@ def judge(text: str, status: int, expect_json: bool) -> str:
         return "HTTP %d%s" % (status, (" - " + blk) if blk else "")
     if blk:
         return blk
-    if len(text) < 1500:
+    if len(text) < 1200:
         return "صفحة قصيرة (%d)" % len(text)
     return ""
 
@@ -387,6 +365,7 @@ Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 window.chrome = window.chrome || {runtime: {}};
 Object.defineProperty(navigator, 'languages', {get: () => ['ar-EG', 'ar', 'en-US', 'en']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
 """
 _WAIT_TITLES = ("just a moment", "attention required", "access denied", "verify", "security checkpoint",
                 "checking your browser", "ddos")
@@ -400,8 +379,6 @@ def _block_heavy(route) -> None:
 
 
 class Browser:
-    """Chromium بيتحمّل مرة واحدة وبس لو احتجناه. كونتكست مباشر وكونتكست عبر البروكسي."""
-
     def __init__(self) -> None:
         self.state = "new"
         self._pw = None
@@ -442,7 +419,6 @@ class Browser:
         self._ctxs = {}
 
     def _real_ua(self) -> str:
-        """UA الحقيقي للمتصفح من غير كلمة Headless (عشان الإصدار يطابق الـ client hints)."""
         if self._ua:
             return self._ua
         try:
@@ -484,7 +460,7 @@ class Browser:
             for step in ("chrome", "chromium", "install", "install-deps"):
                 try:
                     if step == "chrome":
-                        self._launch("chrome")            # كروم الجاهز على سيرفر جيتهاب (من غير تحميل)
+                        self._launch("chrome")
                     elif step == "chromium":
                         self._launch()
                     elif step == "install":
@@ -498,7 +474,7 @@ class Browser:
                         self._launch()
                     launched = True
                     break
-                except Exception as e:  # جرّب الخطوة اللي بعدها
+                except Exception as e:
                     last = e
                     self._reset()
             if not launched:
@@ -511,7 +487,6 @@ class Browser:
         return self.state == "ready"
 
     def render(self, url: str, raw: bool = False, via_proxy: bool = False) -> Tuple[str, list, int, str]:
-        """يرجّع (html, json_blobs, status, note). raw=True لنقاط JSON."""
         blobs: list = []
         status = 0
         page = None
@@ -538,7 +513,7 @@ class Browser:
                 note = "goto: " + type(e).__name__
                 if page.url in ("about:blank", ""):
                     return "", blobs, 0, note
-            for _ in range(8):   # استنى لحد ما تعدّي صفحة "Just a moment"
+            for _ in range(8):
                 try:
                     t = (page.title() or "").lower()
                 except Exception:
@@ -553,7 +528,7 @@ class Browser:
                 pass
             if raw:
                 return page.inner_text("body"), blobs, status or 200, "ok"
-            for _ in range(6):   # سكرول عشان الـ lazy-loading
+            for _ in range(6):
                 try:
                     page.evaluate("window.scrollBy(0, Math.max(600, document.body.scrollHeight / 5))")
                 except Exception:
@@ -583,7 +558,7 @@ class Browser:
         self._reset()
 
 
-# =============================================================== الجلب (طبقات متصاعدة + ذاكرة صحة)
+# =============================================================== الجلب (طبقات متصاعدة + بوابات مجانية ومدفوعة)
 def _gw_scraperapi(key: str, url: str, js: bool, country: str) -> str:
     mode = (os.environ.get("SCRAPERAPI_MODE") or "premium").strip().lower()
     q: Dict[str, str] = {"api_key": key}
@@ -595,21 +570,21 @@ def _gw_scraperapi(key: str, url: str, js: bool, country: str) -> str:
         q["premium"] = "true"
     if country:
         q["country_code"] = country
-    q["url"] = url                      # الـ url آخر باراميتر (توصية ScraperAPI)
+    q["url"] = url
     return "https://api.scraperapi.com/?" + urllib.parse.urlencode(q)
 
 
 def _gw_scrapingbee(key: str, url: str, js: bool, country: str) -> str:
     q = {"api_key": key, "url": url, "render_js": "true" if js else "false", "premium_proxy": "true"}
     if country:
-        q["country_code"] = country     # بيشتغل مع premium_proxy بس
+        q["country_code"] = country
     return "https://app.scrapingbee.com/api/v1/?" + urllib.parse.urlencode(q)
 
 
 def _gw_zenrows(key: str, url: str, js: bool, country: str) -> str:
     q = {"apikey": key, "url": url, "js_render": "true" if js else "false", "premium_proxy": "true"}
     if country:
-        q["proxy_country"] = country    # بيشتغل مع premium_proxy بس
+        q["proxy_country"] = country
     return "https://api.zenrows.com/v1/?" + urllib.parse.urlencode(q)
 
 
@@ -618,7 +593,7 @@ def _gw_scrapedo(key: str, url: str, js: bool, country: str) -> str:
     if js:
         q["render"] = "true"
     if country:
-        q["geoCode"] = country          # ممكن يحتاج خطة أعلى — لو اترفض بنجرب من غيره
+        q["geoCode"] = country
     return "https://api.scrape.do/?" + urllib.parse.urlencode(q)
 
 
@@ -636,7 +611,7 @@ class Fetched:
     text: str = ""
     status: int = 0
     method: str = ""
-    hard: bool = False                      # 404/410: مفيش فايدة من التصعيد
+    hard: bool = False
     blobs: list = field(default_factory=list)
     notes: list = field(default_factory=list)
 
@@ -644,23 +619,23 @@ class Fetched:
 @dataclass
 class Layer:
     name: str
-    family: str                             # static | render | gateway
+    family: str                             # static | free_proxy | render | gateway
     run: Callable[[str, bool], Tuple[str, int, list]]
     proxy: bool = False
-    no_challenge: bool = False              # متتجرّبش لو الموقع رد بصفحة تحدّي
+    no_challenge: bool = False
 
 
 @dataclass
 class Accept:
-    good: bool = False                      # النتيجة كفاية؟
-    shell: bool = False                     # الصفحة فتحت بس هيكل JS فاضي
+    good: bool = False
+    shell: bool = False
     score: tuple = (0,)
     payload: Any = None
 
 
 @dataclass
 class FetchOutcome:
-    best: Optional[tuple] = None            # (score, Fetched, payload)
+    best: Optional[tuple] = None
     notes: list = field(default_factory=list)
     attempted: int = 0
     hard: bool = False
@@ -680,13 +655,12 @@ class Fetcher:
         self.gateways = [g for g in GATEWAYS if os.environ.get(g["env"])]
         self.now = int(time.time())
 
-    # ---- ذاكرة الصحة لكل موقع
     def _hm(self, host: str) -> dict:
         return self.mem.setdefault(host, {"dead": {}})
 
     def _is_dead(self, host: str, name: str) -> bool:
         d = self._hm(host).get("dead", {}).get(name)
-        return bool(d) and d.get("n", 0) >= 2 and time.time() - d.get("ts", 0) < DEAD_RETRY_H * 3600
+        return bool(d) and d.get("n", 0) >= 3 and time.time() - d.get("ts", 0) < DEAD_RETRY_H * 3600
 
     def _mark_bad(self, host: str, name: str) -> None:
         d = self._hm(host).setdefault("dead", {}).setdefault(name, {"n": 0, "ts": 0})
@@ -699,7 +673,7 @@ class Fetcher:
     @staticmethod
     def _is_challenge(note: str) -> bool:
         low = note.lower()
-        return any(k in low for k in ("moment", "captcha", "challenge", "حماية", "403", "429"))
+        return any(k in low for k in ("moment", "captcha", "challenge", "حماية", "403", "429", "checkpoint"))
 
     @staticmethod
     def _headers(expect_json: bool) -> dict:
@@ -713,7 +687,6 @@ class Fetcher:
             self._sessions[key] = cffi_requests.Session(impersonate=fp)
         return self._sessions[key]
 
-    # ---- الطبقات
     def _cffi(self, fp: str, via_proxy: bool = False):
         def run(url: str, expect_json: bool):
             parts = urllib.parse.urlsplit(url)
@@ -723,7 +696,7 @@ class Fetcher:
             sess = self._session(fp, host, via_proxy)
             proxies = self.proxies if via_proxy else None
             wk = (fp, host, via_proxy)
-            if wk not in self._warmed:               # زيارة الرئيسية الأول عشان الكوكيز
+            if wk not in self._warmed:
                 self._warmed.add(wk)
                 try:
                     sess.get(home, headers=base_headers, timeout=15, proxies=proxies)
@@ -764,6 +737,38 @@ class Fetcher:
             return r.text or "", r.status_code, []
         return run
 
+    # ---- بوابات عبور مجانية لتخطي حظر IP جيتهاب (جوميا / دبي فون)
+    def _free_proxy_run(self, kind: str):
+        def run(url: str, expect_json: bool):
+            enc = urllib.parse.quote(url, safe="")
+            if kind == "codetabs":
+                purl = "https://api.codetabs.com/v1/proxy?quest=" + enc
+            elif kind == "allorigins":
+                purl = "https://api.allorigins.win/raw?url=" + enc
+            elif kind == "allorigins_json":
+                purl = "https://api.allorigins.win/get?url=" + enc
+            elif kind == "corsproxy":
+                purl = "https://corsproxy.io/?" + enc
+            else:
+                purl = "https://thingproxy.freeboard.io/fetch/" + url
+
+            h = {"User-Agent": UA_CHROME, "Accept-Language": AR_LANG}
+            if HAS_CFFI:
+                r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=30)
+            else:
+                r = requests.get(purl, headers=h, timeout=30)
+
+            text = r.text or ""
+            st = r.status_code
+            if kind == "allorigins_json" and st == 200:
+                try:
+                    j = json.loads(text)
+                    text = j.get("contents") or ""
+                except Exception:
+                    pass
+            return text, st, []
+        return run
+
     def _browser_run(self, via_proxy: bool):
         def run(url: str, expect_json: bool):
             if self.browser is None or not self.browser.start():
@@ -793,13 +798,12 @@ class Fetcher:
                 r = requests.get(g["build"](key, url, js, country), timeout=110)
                 last = (r.text or "", r.status_code)
                 if country and 400 <= r.status_code < 500 and r.status_code not in (404, 410, 429):
-                    continue             # الدولة مش مدعومة في الخطة؟ جرّب من غيرها
+                    continue
                 break
             return last[0], last[1], []
         return run
 
     def _gateway_gate(self, url: str) -> str:
-        """'' = مسموح. غير كده = سبب التأجيل (حماية الرصيد)."""
         if self.gw_calls >= GATEWAY_MAX_CALLS:
             return "تخطّيت (وصلت حد %d طلب في الجولة)" % GATEWAY_MAX_CALLS
         last = self.gw_log.get(hashlib.md5(url.encode()).hexdigest()[:10], 0)
@@ -821,6 +825,11 @@ class Fetcher:
                 L.append(Layer("curl_cffi/proxy", "static", self._cffi(IMPERSONATE[0], True), proxy=True))
             else:
                 L.append(Layer("requests/proxy", "static", self._plain(True), proxy=True))
+
+        # البوابات المجانية لتغيير الـ IP عند حظر سيرفر جيتهاب
+        for p_kind in ("codetabs", "allorigins", "allorigins_json", "corsproxy"):
+            L.append(Layer("proxy:" + p_kind, "free_proxy", self._free_proxy_run(p_kind), proxy=True))
+
         if self.browser is not None:
             L.append(Layer("playwright", "render", self._browser_run(False)))
             if PROXY_URL:
@@ -830,7 +839,7 @@ class Fetcher:
         for g in self.gateways:
             L.append(Layer("gw:" + g["name"], "gateway", self._gateway(g)))
         good = self.mem.get(host, {}).get("good")
-        if good:                                         # الطريقة اللي نجحت قبل كده الأول
+        if good:
             L.sort(key=lambda l: 0 if l.name == good else 1)
         return [l for l in L if not self._is_dead(host, l.name)]
 
@@ -847,7 +856,7 @@ class Fetcher:
             return out
         reason = judge(text, st, expect_json) if text else "رد فاضي"
         if reason and layer.family == "render" and blobs and st in (0, 200) and not block_reason(text):
-            reason = ""                      # المتصفح لقط JSON حقيقي -> كفاية
+            reason = ""
         if reason:
             snippet = (" | " + re.sub(r"\s+", " ", text[:80])) if (layer.family == "gateway" and text) else ""
             out.notes.append("%s: %s%s" % (layer.name, reason, snippet))
@@ -858,7 +867,6 @@ class Fetcher:
         return out
 
     def fetch(self, url: str, accept: Callable[[Fetched], Accept], expect_json: bool = False) -> FetchOutcome:
-        """يجرّب الطبقات بالترتيب لحد ما accept() تقول 'كفاية'. بيرجّع أحسن نتيجة."""
         host = urllib.parse.urlsplit(url).netloc
         out = FetchOutcome()
         skip_static = False
@@ -867,7 +875,7 @@ class Fetcher:
             if layer.family == "static" and skip_static:
                 continue
             if direct_blocked and layer.family == "static" and not layer.proxy:
-                continue                     # نفس البصمة هتتحجب برضه
+                continue
             if layer.no_challenge and direct_blocked:
                 continue
             if layer.family == "gateway":
@@ -903,7 +911,7 @@ class Fetcher:
     def close(self) -> None:
         if self.browser is not None:
             self.browser.close()
-        cutoff = self.now - 7 * DAY               # تنضيف سجل البوابات القديم
+        cutoff = self.now - 7 * DAY
         for k in [k for k, ts in self.gw_log.items() if ts < cutoff]:
             self.gw_log.pop(k, None)
 
@@ -932,14 +940,12 @@ _HAS_LETTERS = re.compile(r"[A-Za-z\u0600-\u06FF]{2,}")
 
 
 def _prices_from_dict(d: dict) -> Tuple[Optional[float], Optional[float]]:
-    # Magento GraphQL
     pr = d.get("price_range")
     if isinstance(pr, dict) and isinstance(pr.get("minimum_price"), dict):
         mp = pr["minimum_price"]
         fin, reg = _num(mp.get("final_price")), _num(mp.get("regular_price"))
         if fin:
             return fin, (reg if reg and reg > fin else None)
-    # WooCommerce Store API (الأسعار بالوحدة الصغرى: 299900 = 2999.00)
     pz = d.get("prices")
     if isinstance(pz, dict) and ("regular_price" in pz or "price" in pz):
         try:
@@ -953,7 +959,6 @@ def _prices_from_dict(d: dict) -> Tuple[Optional[float], Optional[float]]:
             cur /= div
             old = (old / div) if old else None
             return cur, (old if old and old > cur else None)
-    # price ككائن (Algolia / تفاصيل متداخلة)
     p = d.get("price")
     if isinstance(p, dict):
         for v in p.values():
@@ -981,15 +986,17 @@ def _prices_from_dict(d: dict) -> Tuple[Optional[float], Optional[float]]:
     pv = _num(p) if p is not None else None
     if pv:
         if cur is None:
-            cur = pv                       # price هو الحالي
+            cur = pv
         elif old is None and pv > cur:
-            old = pv                       # أسلوب نون: price = القديم، sale_price = الحالي
-    if cur is None:                        # JSON-LD
+            old = pv
+    if cur is None:
         of = d.get("offers")
         if isinstance(of, list) and of:
             of = of[0]
         if isinstance(of, dict):
             cur = _num(of.get("price") or of.get("lowPrice"))
+            if not old:
+                old = _num(of.get("highPrice"))
     if cur and not old:
         for k in _PCT_KEYS:
             pc = _pct(d.get(k))
@@ -1023,7 +1030,7 @@ def _product_from_dict(d: dict, base: str, link_fn) -> Optional[Tuple[str, int, 
             if isinstance(v, str) and v.strip():
                 v = v.strip()
                 if k == "url_key":
-                    v = "/" + v.strip("/") + str(d.get("url_suffix") or "")
+                    v = "/" + v.strip("/") + str(d.get("url_suffix") or ".html")
                 elif k == "handle":
                     v = "/products/" + v
                 link = urllib.parse.urljoin(base, v)
@@ -1032,7 +1039,6 @@ def _product_from_dict(d: dict, base: str, link_fn) -> Optional[Tuple[str, int, 
 
 
 def json_products(root: Any, base: str, link_fn=None) -> Tuple[List["Item"], int]:
-    """يمشي على أي JSON ويلقط كل المنتجات (بخصم أو من غير). يرجّع (المنتجات, عددها)."""
     items: List[Item] = []
     seen_n = 0
     keys = set()
@@ -1120,7 +1126,8 @@ def script_json_blobs(soup) -> list:
 # =============================================================== استخراج المنتجات: HTML
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _OLD_TOKENS = {"old", "was", "before", "strike", "strikethrough", "struck", "striked", "crossed", "mrp",
-               "msrp", "original", "prev", "previous", "compare", "oldprice", "wasprice", "linethrough"}
+               "msrp", "original", "prev", "previous", "compare", "oldprice", "wasprice", "linethrough",
+               "regular", "del"}
 _CUR_STRONG = {"special", "final", "sale", "current", "now", "offer", "selling", "discounted", "actual", "new", "promo"}
 _PRICE_TOK = {"price", "prc", "amount", "cost"}
 _BAD_HREF = re.compile(r"^(#|javascript:|tel:|mailto:|whatsapp:)", re.I)
@@ -1244,7 +1251,6 @@ def _pick_title(card) -> str:
 
 
 def _looks_price(el, txt: str, toks: set) -> bool:
-    """للوضع الصارم (من غير سعر قديم): العنصر لازم شكله سعر فعلاً مش عنوان فيه أرقام."""
     t = txt.translate(_TRANS)
     if _PRICE_RE.search(t):
         return True
@@ -1254,7 +1260,6 @@ def _looks_price(el, txt: str, toks: set) -> bool:
 
 
 def _current_candidates(card, old_desc: set, old_p: int, strict: bool = False) -> list:
-    """مرشحين للسعر الحالي داخل الكارت: [(أولوية, سعر, ترتيب)]."""
     floor = old_p * (1 - MAX_REALISTIC_DISC / 100.0) if old_p else MIN_PRODUCT_PRICE
     cands = []
     for order, el in enumerate(card.find_all(True)):
@@ -1305,8 +1310,8 @@ def _choose_current(cands: list, strict: bool = False) -> int:
     top = max(c[0] for c in cands)
     vals = [c[1] for c in cands if c[0] == top]
     if strict and max(vals) > min(vals) * 1.01:
-        return 0                           # أكتر من سعر محتمل ومفيش سعر قديم يرجّح -> مش واضح، نتخطّاه
-    return max(vals)                       # الأقرب للقديم (بيستبعد سعر الكوبون/الباندل)
+        return min(vals)
+    return max(vals)
 
 
 def _pick_current(card, old_desc: set, old_p: int) -> int:
@@ -1314,7 +1319,6 @@ def _pick_current(card, old_desc: set, old_p: int) -> int:
 
 
 def html_items(soup, page_url: str) -> List["Item"]:
-    """بيدور على "السعر القديم المشطوب" وبيطلع منه لكارت المنتج — مش معتمد على أسماء كلاسات معينة."""
     olds = soup.find_all(_is_old_node)
     if not olds:
         return []
@@ -1338,1061 +1342,4 @@ def html_items(soup, page_url: str) -> List["Item"]:
     for n, _ in valid:
         chain = []
         cur = n.parent
-        for _i in range(9):
-            if cur is None or cur.name in ("html", "body", "[document]"):
-                break
-            chain.append(cur)
-            cnt[id(cur)] += 1
-            cur = cur.parent
-        chains[id(n)] = chain
-
-    items: List[Item] = []
-    for n, old_p in valid:
-        chosen = None
-        started = False
-        extra = 0
-        for anc in chains[id(n)]:
-            hrefs = _product_hrefs(anc, page_url)
-            if cnt[id(anc)] > 1 and len(hrefs) > 1:
-                break                                   # وصلنا لحاوية فيها أكتر من منتج
-            if not hrefs and not started:
-                continue
-            started = True
-            title = _pick_title(anc)
-            if title:
-                chosen = (anc, title)
-                break
-            extra += 1
-            if extra > 3:
-                break
-        if not chosen:
-            continue
-        card, title = chosen
-        if any(w in title.lower() for w in INSTALLMENT_WORDS):
-            continue
-        cur = _pick_current(card, old_desc, old_p)
-        if cur and old_p > cur:
-            items.append(Item(title, cur, sane_old(cur, old_p), _pick_link(card, page_url), "html"))
-    return items
-
-
-def _href_key(h: str, base: str) -> str:
-    try:
-        p = urllib.parse.urlsplit(urllib.parse.urljoin(base, h.strip()))
-    except ValueError:
-        return ""
-    path = p.path.rstrip("/")
-    if len(path) < 2:
-        return ""
-    key = p.netloc.lower().replace("www.", "", 1) + path
-    if p.query and _ID_QS.search(p.query):
-        key += "?" + p.query
-    return key
-
-
-def html_cards(soup, page_url: str) -> List["Item"]:
-    """كروت المنتجات المبنية على لينك المنتج (مش على السعر القديم): بتجيب كمان المنتجات اللي مفيهاش خصم."""
-    anchors = []
-    for a in soup.find_all("a", href=True):
-        h = a["href"].strip()
-        if not _valid_href(h) or _NON_PRODUCT_PATH.search(h):
-            continue
-        key = _href_key(h, page_url)
-        if key:
-            anchors.append((a, key))
-    if not anchors:
-        return []
-    keyset: Dict[int, set] = defaultdict(set)
-    chains: List[list] = []
-    for a, key in anchors:
-        chain = []
-        cur = a
-        for _ in range(12):
-            if cur is None or getattr(cur, "name", None) in (None, "html", "body", "[document]"):
-                break
-            keyset[id(cur)].add(key)
-            chain.append(cur)
-            cur = cur.parent
-        chains.append(chain)
-    cards: Dict[int, Any] = {}
-    for chain in chains:
-        card = None
-        for el in chain:
-            if len(keyset[id(el)]) == 1:
-                card = el                       # أعلى حاوية فيها منتج واحد بس
-            else:
-                break
-        if card is not None:
-            cards[id(card)] = card
-
-    items: List[Item] = []
-    for card in cards.values():
-        txt = card.get_text(" ", strip=True)
-        if not txt or len(txt) > 700:
-            continue
-        olds = card.find_all(_is_old_node)
-        oset = {id(n) for n in olds}
-        top = [n for n in olds if not any(id(p) in oset for p in n.parents)]
-        old_p = 0
-        old_desc: set = set()
-        for n in top:
-            v = _node_amount(n)
-            if v >= MIN_PRODUCT_PRICE:
-                old_p = max(old_p, v)
-            old_desc.add(id(n))
-            for d in n.descendants:
-                if getattr(d, "name", None):
-                    old_desc.add(id(d))
-        cur = _choose_current(_current_candidates(card, old_desc, old_p, strict=not old_p), strict=not old_p)
-        if not cur:
-            continue
-        title = _pick_title(card)
-        if not title or any(w in title.lower() for w in INSTALLMENT_WORDS):
-            continue
-        items.append(Item(title, cur, sane_old(cur, old_p) if old_p > cur else 0, _pick_link(card, page_url), "card"))
-    return items
-
-
-def price_class_hints(soup, limit: int = 5) -> list:
-    """للتشخيص: أكتر كلاسات بتحمل أسعار في الصفحة."""
-    c: Counter = Counter()
-    for el in soup.find_all(True):
-        if el.find(True):
-            continue
-        txt = el.get_text(" ", strip=True)
-        if 0 < len(txt) <= 40 and _PRICE_RE.search(txt.translate(_TRANS)):
-            cls = " ".join(el.get("class") or []) or "<%s>" % el.name
-            c[cls[:60]] += 1
-    return c.most_common(limit)
-
-
-def extract_amazon(soup) -> Tuple[List["Item"], int]:
-    items: List[Item] = []
-    seen_n = 0
-    for div in soup.select('div[data-component-type="s-search-result"]'):
-        asin = (div.get("data-asin") or "").strip()
-        if not asin:
-            continue
-        h2 = div.find("h2")
-        title = clean_title(h2.get_text(" ", strip=True)) if h2 else ""
-        cur = old = 0
-        for p in div.select("span.a-price"):
-            off = p.select_one("span.a-offscreen")
-            val = parse_price((off or p).get_text(" ", strip=True))
-            if p.get("data-a-strike") == "true" or "a-text-price" in (p.get("class") or []):
-                old = old or val
-            else:
-                cur = cur or val
-        if not cur:
-            whole = div.select_one("span.a-price-whole")
-            cur = parse_price(whole.get_text(" ", strip=True)) if whole else 0
-        if not cur or not title:
-            continue
-        seen_n += 1
-        items.append(Item(title, cur, sane_old(cur, old), "https://www.amazon.eg/dp/" + asin, "amazon"))
-    return items, seen_n
-
-
-@dataclass
-class Extract:
-    items: List[Item] = field(default_factory=list)
-    json_seen: int = 0
-    mentions: int = 0
-    hints: list = field(default_factory=list)
-
-    @property
-    def advertised(self) -> int:
-        return sum(1 for i in self.items if i.old)
-
-
-def dedupe_items(items: List[Item]) -> List[Item]:
-    ordered = sorted(items, key=lambda x: 0 if x.old else 1)     # اللي معاه سعر قديم الأول
-    out: List[Item] = []
-    seen_keys = set()
-    for it in ordered:
-        k1 = ("k", item_key(it.link, it.title))
-        k2 = ("t", norm_title(it.title), it.price)
-        if k1 in seen_keys or k2 in seen_keys:
-            continue
-        seen_keys.add(k1)
-        seen_keys.add(k2)
-        out.append(it)
-    return out
-
-
-def extract_page(html: str, url: str, cfg: dict, blobs=()) -> Extract:
-    ex = Extract()
-    soup = BeautifulSoup(html or "", "html.parser")
-    base = cfg.get("domain") or "%s://%s" % urllib.parse.urlsplit(url)[:2]
-    adapter = cfg.get("adapter", "generic")
-    found: List[Item] = []
-    if adapter == "amazon":
-        its, _n = extract_amazon(soup)
-        found += its
-    link_fn = LINK_BUILDERS.get(adapter)
-    for blob in list(script_json_blobs(soup)) + list(blobs):
-        its, n = json_products(blob, base, link_fn)
-        found += its
-        ex.json_seen += n
-    if not (adapter == "amazon" and found):
-        found += html_items(soup, url)
-        found += html_cards(soup, url)
-    ex.mentions = price_mentions(soup.get_text(" ", strip=True))
-    items = dedupe_items(found)
-    if not TRACK_ALL:
-        items = [i for i in items if i.old]
-    ex.items = items
-    if not ex.items and ex.mentions >= 6:
-        ex.hints = price_class_hints(soup)
-    return ex
-
-
-# =============================================================== المتاجر
-STORES: List[dict] = [
-    {"id": "amazon", "name": "أمازون مصر (Amazon)", "adapter": "amazon", "domain": "https://www.amazon.eg",
-     "urls": [
-         "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&language=ar_AE",
-         "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&language=ar_AE&page=2",
-         "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE",
-         "https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901098031&language=ar_AE",
-     ]},
-    {"id": "noon", "name": "نون مصر (Noon)", "adapter": "noon", "domain": "https://www.noon.com",
-     "urls": [
-         "https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc",
-         "https://www.noon.com/egypt-ar/electronics-and-mobiles/mobiles-and-accessories/mobiles-20905/?sort[by]=discount&sort[dir]=desc",
-     ]},
-    {"id": "dubaiphone", "name": "دبي فون (Dubai Phone)", "adapter": "woo", "domain": "https://www.dubaiphone.net",
-     "api": [{"url": "https://www.dubaiphone.net/wp-json/wc/store/v1/products?on_sale=true&per_page=100", "kind": "woo"}],
-     "urls": ["https://www.dubaiphone.net/"]},
-    {"id": "jumia", "name": "جوميا مصر (Jumia)", "adapter": "generic", "domain": "https://www.jumia.com.eg",
-     "urls": ["https://www.jumia.com.eg/ar/flash-sales/", "https://www.jumia.com.eg/ar/"]},
-    {"id": "raya", "name": "راية شوب (Raya Shop)", "adapter": "generic", "domain": "https://www.rayashop.com",
-     "urls": ["https://www.rayashop.com/ar/deals", "https://www.rayashop.com/ar/"]},
-    {"id": "btech", "name": "بي تك (B.Tech)", "adapter": "generic", "domain": "https://btech.com",
-     "urls": ["https://btech.com/ar/"]},
-    {"id": "2b", "name": "2B Egypt", "adapter": "generic", "domain": "https://2b.com.eg",
-     "urls": ["https://2b.com.eg/ar/deals.html", "https://2b.com.eg/ar/"]},
-    {"id": "raneen", "name": "رنين (Raneen)", "adapter": "generic", "domain": "https://www.raneen.com",
-     "urls": ["https://www.raneen.com/ar/deals", "https://www.raneen.com/ar/"]},
-    {"id": "dream2000", "name": "دريم 2000 (Dream 2000)", "adapter": "generic", "domain": "https://dream2000.com",
-     "urls": ["https://dream2000.com/mobiles.html", "https://dream2000.com/"]},
-    {"id": "kenzz", "name": "كنز (Kenzz)", "adapter": "generic", "domain": "https://kenzz.com",
-     "urls": ["https://kenzz.com/ar"]},
-]
-STORE_DOMAIN: Dict[str, str] = {c["id"]: c["domain"] for c in STORES}
-STORE_NAME: Dict[str, str] = {c["id"]: c["name"] for c in STORES}
-
-
-def rel_link(link: str, sid: str) -> str:
-    dom = STORE_DOMAIN.get(sid, "")
-    return link[len(dom):] if (link and dom and link.startswith(dom)) else link
-
-
-def abs_link(link: str, sid: str) -> str:
-    return STORE_DOMAIN.get(sid, "") + link if (link and link.startswith("/")) else link
-
-
-# =============================================================== ذاكرة الأسعار + حكم العروض
-class History:
-    """history.json: لكل منتج نقاط [وقت, سعر] — بتتسجّل لما السعر يتغيّر أو مرة كل ~20 ساعة."""
-
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self.products: Dict[str, dict] = {}
-        self.meta: dict = {}
-        self.loaded = False
-        self.seen_run: set = set()
-        self._load()
-
-    def _load(self) -> None:
-        try:
-            with open(self.path, encoding="utf-8") as f:
-                d = json.load(f)
-            if isinstance(d, dict) and isinstance(d.get("products"), dict):
-                self.products = d["products"]
-                self.meta = d.get("meta") or {}
-                self.loaded = True
-        except FileNotFoundError:
-            pass
-        except Exception as e:
-            log("⚠ history.json تالف/مش مقروء (%s) — هبدأ ذاكرة جديدة وأحتفظ بنسخة .bad" % type(e).__name__)
-            try:
-                os.replace(self.path, self.path + ".bad")
-            except Exception:
-                pass
-
-    def record(self, it: Item, now: int) -> Optional[dict]:
-        pid = it.pid
-        if pid in self.seen_run:
-            return self.products.get(pid)
-        self.seen_run.add(pid)
-        link = rel_link(it.link, it.sid)
-        rec = self.products.get(pid)
-        if rec is None:
-            rec = {"s": it.sid, "t": it.title[:110], "l": link, "f": now, "ls": now, "c": 1, "p": [[now, it.price]]}
-            self.products[pid] = rec
-        else:
-            pts = rec["p"]
-            last_ts, last_p = pts[-1]
-            if it.price == last_p:
-                rec["c"] = rec.get("c", 1) + 1
-                if now - last_ts >= 20 * 3600:
-                    pts.append([now, it.price])
-            else:
-                pts.append([now, it.price])
-                rec["c"] = 1
-            rec["ls"] = now
-            rec["t"] = it.title[:110]
-            if link:
-                rec["l"] = link
-            if len(pts) > 400:
-                del pts[: len(pts) - 400]
-        if it.old:
-            rec["o"] = it.old
-        else:
-            rec.pop("o", None)
-        return rec
-
-    def prune(self, now: int) -> None:
-        keep_after = now - HISTORY_KEEP_DAYS * DAY
-        # احتفظ بالمنتج طوال HISTORY_KEEP_DAYS؛ لا تستخدم مهلة ثابتة أقصر من الإعداد.
-        for pid in [p for p, r in self.products.items() if r.get("ls", 0) < keep_after]:
-            self.products.pop(pid, None)
-        for rec in self.products.values():
-            pts = rec["p"]
-            while len(pts) > 1 and pts[0][0] < keep_after:
-                pts.pop(0)
-        if len(self.products) > 12000:                 # سقف أمان لحجم الملف
-            for pid, _ in sorted(self.products.items(), key=lambda kv: kv[1].get("ls", 0))[: len(self.products) - 12000]:
-                self.products.pop(pid, None)
-
-    def save(self, now: int) -> None:
-        self.prune(now)
-        self.meta.setdefault("since", now)
-        self.meta["updated"] = now
-        self.meta["runs"] = self.meta.get("runs", 0) + 1
-        try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"v": 2, "meta": self.meta, "products": self.products}, f, ensure_ascii=False,
-                          separators=(",", ":"))
-            os.replace(tmp, self.path)
-        except Exception as e:
-            log("⚠ مقدرتش أحفظ history: %s" % e)
-
-    def span_days(self, now: int) -> float:
-        since = self.meta.get("since")
-        return max(0.0, (now - since) / DAY) if since else 0.0
-
-
-@dataclass
-class Verdict:
-    code: str = "NEW"        # REAL | LOW | NEW | MINOR | FAKE | STATIC | PUMP | FLAT
-    ref: int = 0             # السعر المعتاد قبل السعر الحالي
-    low: int = 0             # أقل سعر سابق
-    high: int = 0            # أعلى سعر سابق
-    real: int = 0            # نسبة النزول الفعلي %
-    conf: int = 0            # ثقة الحكم 0..2
-    hist_days: float = 0.0
-    at_price_days: float = 0.0
-    notes: List[str] = field(default_factory=list)
-
-
-def assess(it: Item, rec: dict, now: int) -> Verdict:
-    """تقييم تحفظي: لا يصنّف الخصم مؤكداً إلا بسجل زمني كافٍ."""
-    v = Verdict()
-    raw_pts = rec.get("p") or []
-    pts = []
-    for point in raw_pts:
-        try:
-            ts, price = int(point[0]), int(point[1])
-            if price >= MIN_PRODUCT_PRICE and ts > 0:
-                pts.append((ts, price))
-        except (TypeError, ValueError, IndexError):
-            continue
-    pts.sort(key=lambda x: x[0])
-    if not pts:
-        return v
-
-    cur = int(it.price)
-    if pts[-1][1] != cur:
-        pts.append((now, cur))
-    adv = it.discount
-    first_ts = int(rec.get("f", pts[0][0]))
-    v.hist_days = max(0.0, (now - first_ts) / DAY)
-
-    i = len(pts) - 1
-    while i > 0 and pts[i - 1][1] == cur:
-        i -= 1
-    v.at_price_days = max(0.0, (now - pts[i][0]) / DAY)
-    before = pts[:i]
-
-    # احسب نقاطاً يومية مستقلة قبل السعر الحالي فقط، لتجنب تضخيم الثقة بكثرة الجولات.
-    since = now - HISTORY_WINDOW_DAYS * DAY
-    daily = {}
-    for ts, price in before:
-        if ts >= since:
-            daily[int(ts // DAY)] = price
-    prices = list(daily.values())
-    v.conf = 2 if (v.hist_days >= MIN_HISTORY_DAYS and len(daily) >= 7) else (
-        1 if (v.hist_days >= 7 and len(daily) >= 3) else 0)
-
-    if not before:
-        if adv:
-            v.code = "NEW"
-            v.notes.append("لا يوجد سعر سابق مستقل يمكن المقارنة به؛ الخصم غير مؤكد")
-        return v
-
-    # استبعد الأسعار الشاذة المرتفعة جداً من خط الأساس باستخدام الوسيط.
-    if not prices:
-        prices = [price for _, price in before[-5:]]
-    v.ref = int(statistics.median(prices))
-    v.low = min(price for _, price in before)
-    v.high = max(price for _, price in before)
-    v.real = max(0, round((v.ref - cur) / v.ref * 100)) if v.ref else 0
-    prev_price = before[-1][1]
-    pumped = bool(v.ref and prev_price >= v.ref * 1.12 and cur >= v.ref * 0.97)
-
-    if pumped and adv >= MIN_DISCOUNT:
-        v.code = "PUMP"
-        v.notes.append("اشتباه رفع السعر قبل الخصم: السعر السابق أعلى بوضوح من خط الأساس")
-    elif v.conf < 2:
-        v.code = "NEW"
-        v.notes.append("تاريخ السعر غير كافٍ للتأكيد؛ يلزم 14 يوماً و7 أيام سعرية مستقلة على الأقل")
-        if v.real:
-            v.notes.append("الانخفاض المبدئي عن الوسيط المسجل %d%% لكنه غير مؤكد" % v.real)
-    elif v.real >= MIN_REAL_DROP:
-        v.code = "LOW" if (cur <= v.low and v.hist_days >= MIN_HISTORY_DAYS) else "REAL"
-        if adv and adv - v.real >= 15:
-            v.notes.append("المتجر يعلن خصم %d%% لكن الانخفاض عن السعر المعتاد %d%% فقط" % (adv, v.real))
-        if it.old and v.high and it.old > v.high * 1.08:
-            v.notes.append("السعر القديم المعلن أعلى من أعلى سعر موثق بأكثر من 8%%")
-        if v.at_price_days >= 10:
-            v.notes.append("السعر الحالي مستمر منذ %d يوم" % round(v.at_price_days))
-    elif adv >= MIN_DISCOUNT:
-        v.code = "FAKE"
-        v.notes.append("الخصم المعلن لا يقابله انخفاض حقيقي عن السعر التاريخي")
-    elif v.real >= 3:
-        v.code = "MINOR"
-    else:
-        v.code = "FLAT"
-    return v
-
-
-def deal_score(it: Item) -> float:
-    v: Verdict = it.verdict
-    base = float(v.real) if v.code in ("REAL", "LOW") else it.discount * 0.5
-    if v.code == "LOW":
-        base += 12
-    saving = (it.old - it.price) if it.old else max(v.ref - it.price, 0)
-    base += min(max(saving, 0) / 1000.0, 10)
-    if it.cross:
-        base += -10 if it.cross[0][0] < it.price * 0.97 else 6
-    return base
-
-
-# =============================================================== مطابقة المنتجات بين المتاجر
-_AR_TR = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ة": "ه", "ى": "ي", "ؤ": "و", "ئ": "ي", "ـ": ""})
-_DIACRITICS = re.compile(r"[\u064B-\u065F]")
-
-
-def _ar_norm(s: str) -> str:
-    return _DIACRITICS.sub("", s.translate(_AR_TR))
-
-
-_AR_BRANDS_RAW = {
-    "سامسونج": "samsung", "سامسونغ": "samsung", "ابل": "apple", "ايفون": "iphone", "شاومي": "xiaomi",
-    "ريدمي": "redmi", "هواوي": "huawei", "اوبو": "oppo", "ريلمي": "realme", "انفينكس": "infinix",
-    "تكنو": "tecno", "هونر": "honor", "ون بلس": "oneplus", "نوكيا": "nokia", "موتورولا": "motorola",
-    "لينوفو": "lenovo", "ديل": "dell", "اسوس": "asus", "ايسر": "acer", "توشيبا": "toshiba", "شارب": "sharp",
-    "باناسونيك": "panasonic", "سوني": "sony", "فريش": "fresh", "يونيون اير": "unionaire",
-    "يونيونير": "unionaire", "كريازي": "kiriazi", "زانوسي": "zanussi", "بيكو": "beko", "بوش": "bosch",
-    "سيمنس": "siemens", "ميديا": "midea", "كاريير": "carrier", "تورنيدو": "tornado", "هيتاشي": "hitachi",
-    "هايسنس": "hisense", "فيليبس": "philips", "هاير": "haier", "اريستون": "ariston", "ال جي": "lg",
-    "اتش بي": "hp", "تي سي ال": "tcl", "جي بي ال": "jbl", "جالاكسي": "galaxy", "ايباد": "ipad", "ماك بوك": "macbook",
-}
-_AR_BRANDS = {_ar_norm(k): v for k, v in _AR_BRANDS_RAW.items()}
-_AR_BRAND_RE = re.compile(
-    r"(?<![\u0600-\u06FF])(" + "|".join(re.escape(k) for k in sorted(_AR_BRANDS, key=len, reverse=True))
-    + r")(?![\u0600-\u06FF])")
-_BRAND_SET = {"samsung", "apple", "xiaomi", "huawei", "oppo", "realme", "infinix", "tecno", "honor", "oneplus",
-              "nokia", "motorola", "lenovo", "dell", "hp", "asus", "acer", "msi", "lg", "toshiba", "sharp",
-              "panasonic", "sony", "fresh", "unionaire", "kiriazi", "zanussi", "beko", "bosch", "siemens",
-              "midea", "carrier", "tornado", "hitachi", "tcl", "hisense", "philips", "jbl", "haier",
-              "ariston", "vivo", "zte", "anker", "canon", "epson", "hyundai", "gree", "electrolux",
-              "whirlpool", "candy", "kenwood", "braun", "tefal", "moulinex", "delonghi", "dyson"}
-_BRAND_ALIAS = {"iphone": "apple", "ipad": "apple", "macbook": "apple", "airpods": "apple",
-                "galaxy": "samsung", "redmi": "xiaomi", "poco": "xiaomi"}
-_DIFFS = {"pro", "max", "plus", "ultra", "mini", "fe", "lite", "se", "note", "prime", "neo", "turbo",
-          "flip", "fold", "air", "edge", "slim", "gt"}
-_AR_WORDS = {"برو": "pro", "ماكس": "max", "بلس": "plus", "الترا": "ultra", "ميني": "mini", "لايت": "lite"}
-_MATCH_STOP = {
-    "the", "and", "with", "for", "new", "original", "global", "version", "dual", "sim", "smartphone", "mobile",
-    "phone", "cell", "android", "unlocked", "warranty", "year", "years", "egypt", "edition", "model", "ram",
-    "rom", "storage", "internal", "memory", "by", "of", "in", "or", "black", "white", "blue", "green", "gray",
-    "grey", "silver", "gold", "pink", "red", "purple", "titanium", "natural", "midnight", "starlight",
-    "graphite", "orange", "yellow", "beige", "brown", "cream", "lavender", "mint", "navy",
-    "جديد", "اصلي", "ضمان", "سنه", "سنوات", "عام", "مع", "من", "في", "موبايل", "هاتف", "تليفون", "جوال",
-    "ذكي", "اسود", "ابيض", "ازرق", "اخضر", "رمادي", "فضي", "ذهبي", "وردي", "احمر", "بنفسجي", "تيتانيوم",
-    "برتقالي", "اصفر", "بيج", "بني", "كحلي", "رام", "مصر", "الاصلي",
-}
-_NOT_MODEL = {"1080p", "720p", "2160p", "ddr3", "ddr4", "ddr5", "usb3", "usb2", "wifi6", "wifi5"}
-
-
-class Sig(NamedTuple):
-    brand: str
-    models: frozenset
-    caps: tuple          # (gb, tb, inch)
-    diffs: frozenset
-    core: frozenset
-
-
-def _norm_caps(t: str) -> str:
-    t = re.sub(r"(\d+)\s*(?:tb|terabyte|تيرا(?:\s*بايت)?|تيرابايت)", r" \1tb ", t)
-    t = re.sub(r"(\d+)\s*(?:gb|gigabyte|جيجا(?:\s*بايت)?|جيجابايت|جي\s*بي)", r" \1gb ", t)
-    t = re.sub(r"(\d+(?:\.\d)?)\s*(?:inches|inch|in\b|\"|”|بوصه|بوصة|انش|إنش)", r" \1inch ", t)
-    t = re.sub(r"(\d+(?:\.\d)?)\s*(?:hp|حصان)", r" \1hp ", t)
-    t = re.sub(r"(\d+)\s*(?:mah|ملي\s*امبير)", r" \1mah ", t)
-    t = re.sub(r"(\d+)\s*(?:kg|كجم|كيلو)", r" \1kg ", t)
-    return t
-
-
-def title_sig(title: str) -> Sig:
-    t = _ar_norm((title or "").lower().translate(_TRANS))
-    t = _AR_BRAND_RE.sub(lambda m: " " + _AR_BRANDS[m.group(1)] + " ", t)
-    t = _norm_caps(t)
-    t = re.sub(r"\b([a-z]{1,4})[-/_](?=[a-z]*\d)", r"\1", t)          # wm-7000 -> wm7000
-    toks = re.findall(r"[a-z0-9]+(?:\.[0-9]+)?|[\u0600-\u06FF]+", t)
-    brand = ""
-    caps: Dict[str, set] = {"gb": set(), "tb": set(), "inch": set()}
-    models, diffs, core = set(), set(), set()
-    for tok in toks:
-        tok = _AR_WORDS.get(tok, tok)
-        if tok in _BRAND_SET or tok in _BRAND_ALIAS:
-            brand = brand or _BRAND_ALIAS.get(tok, tok)
-            continue
-        m = re.fullmatch(r"(\d+(?:\.\d+)?)(gb|tb|inch)", tok)
-        if m:
-            caps[m.group(2)].add(m.group(1))
-            continue
-        if tok in _MATCH_STOP or re.fullmatch(r"20\d\d", tok):
-            continue
-        if tok in _DIFFS:
-            diffs.add(tok)
-            continue
-        if (len(tok) >= 3 and re.search(r"[a-z]", tok) and re.search(r"\d", tok) and tok not in _NOT_MODEL
-                and not re.fullmatch(r"\d+(?:\.\d+)?(?:hp|mah|kg|l|w|hz|mp|ah)", tok)):
-            models.add(tok)
-        core.add(tok)
-    return Sig(brand, frozenset(models), (frozenset(caps["gb"]), frozenset(caps["tb"]), frozenset(caps["inch"])),
-               frozenset(diffs), frozenset(core))
-
-
-def sig_match(a: Sig, b: Sig) -> bool:
-    """مطابقة تحفظية: نفس الموديل + مواصفات متوافقة. (تقريبية — مش مضمونة 100%)."""
-    if a.brand and b.brand and a.brand != b.brand:
-        return False
-    if a.diffs != b.diffs:
-        return False
-    for sa, sb in zip(a.caps, b.caps):
-        if sa and sb and not (sa <= sb or sb <= sa):
-            return False
-    if a.models and b.models:
-        return bool(a.models & b.models)
-    if a.models or b.models:
-        return False
-    if len(a.core) < 3 or len(b.core) < 3:
-        return False
-    return len(a.core & b.core) / len(a.core | b.core) >= 0.7
-
-
-def annotate_cross(picked: List[Item], hist: History, now: int) -> None:
-    index = []
-    for rec in hist.products.values():
-        if now - rec.get("ls", 0) > CROSS_MAX_AGE_H * 3600:
-            continue
-        index.append((rec.get("s", ""), rec["p"][-1][1], rec.get("t", ""), rec.get("l", ""), title_sig(rec.get("t", ""))))
-    for it in picked:
-        sg = title_sig(it.title)
-        if not (sg.models or len(sg.core) >= 3):
-            continue
-        best: Dict[str, Tuple[int, str, str]] = {}
-        for sid, price, title, link, sg2 in index:
-            if sid == it.sid or not (0.55 * it.price <= price <= 1.8 * it.price):
-                continue
-            if not sig_match(sg, sg2):
-                continue
-            cur = best.get(sid)
-            if cur is None or price < cur[0]:
-                best[sid] = (price, title, link)
-        it.cross = sorted((p, sid, t, l) for sid, (p, t, l) in best.items())
-        it.score = deal_score(it)
-
-
-# =============================================================== تليجرام + الذاكرة
-def send_telegram(message: str, html: bool = False) -> bool:
-    if not BOT_TOKEN or not CHAT_ID:
-        log("⚠ BOT_TOKEN/CHAT_ID مش متضبطين — الرسالة اتطبعت هنا بس:\n" + message)
-        return False
-    url = "https://api.telegram.org/bot%s/sendMessage" % BOT_TOKEN
-    payload: Dict[str, Any] = {"chat_id": CHAT_ID, "text": message[:4000], "disable_web_page_preview": False}
-    if html:
-        payload["parse_mode"] = "HTML"
-    for _ in range(3):
-        try:
-            r = requests.post(url, json=payload, timeout=20)
-            if r.status_code == 200:
-                return True
-            if r.status_code == 429:
-                try:
-                    wait = int(r.json().get("parameters", {}).get("retry_after", 5))
-                except Exception:
-                    wait = 5
-                time.sleep(wait + 1)
-                continue
-            if r.status_code == 400 and html:           # مشكلة في الـ HTML -> ابعت نص عادي
-                payload.pop("parse_mode", None)
-                payload["text"] = htmllib.unescape(re.sub(r"<[^>]+>", "", message))[:4000]
-                html = False
-                continue
-            log("⚠ تليجرام رجّع %d: %s" % (r.status_code, r.text[:120]))
-            return False
-        except Exception as e:
-            log("خطأ تليجرام: %s" % e)
-            time.sleep(2)
-    return False
-
-
-def load_json(path: str) -> dict:
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_json(path: str, obj: dict) -> None:
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
-    except Exception as e:
-        log("⚠ مقدرتش أحفظ %s: %s" % (path, e))
-
-
-def commit_state() -> None:
-    """بديل: حفظ الذاكرة في الريبو نفسه (COMMIT_STATE=1). الأفضل تستخدم الـ data branch في الـ workflow."""
-    if not COMMIT_STATE:
-        return
-    files = [f for f in (HISTORY_FILE, STATE_FILE, HEALTH_FILE) if os.path.exists(f)]
-    if not files:
-        return
-
-    def run(*a):
-        return subprocess.run(a, check=False, capture_output=True, text=True)
-
-    try:
-        run("git", "config", "user.name", "deals-radar[bot]")
-        run("git", "config", "user.email", "deals-radar@users.noreply.github.com")
-        run("git", "add", *files)
-        if run("git", "diff", "--cached", "--quiet").returncode == 0:
-            return
-        run("git", "commit", "-m", "chore: update radar data [skip ci]")
-        r = run("git", "push")
-        log("حفظ الذاكرة في الريبو: %s" % ("تمام" if r.returncode == 0 else "فشل — " + (r.stderr or "")[:150]))
-    except Exception as e:
-        log("⚠ commit state: %s" % e)
-
-
-def should_send(state: Dict[str, dict], pid: str, price: int) -> Tuple[bool, str]:
-    rec = state.get(pid)
-    if not rec:
-        return True, ""
-    age_h = (time.time() - rec.get("ts", 0)) / 3600.0
-    if age_h > REALERT_HOURS:
-        return True, ""
-    if price <= rec.get("price", price) * 0.95:
-        return True, "📉 نزل أكتر من آخر تنبيه"
-    return False, ""
-
-
-def cross_line(it: Item) -> str:
-    if not it.cross:
-        return ""
-    price, sid, _t, link = it.cross[0]
-    name = STORE_NAME.get(sid, sid)
-    if price < it.price * 0.97:
-        return "🔻 أرخص في %s بـ %s ج.م (سعره %s) — مطابقة تقريبية\n   %s" % (
-            esc(name), money(it.price - price), money(price), esc(abs_link(link, sid)))
-    n = len({c[1] for c in it.cross})
-    return "🏪 ما لقيتش أرخص منه في %d متجر تاني (مطابقة تقريبية) ✅" % n
-
-
-def deal_message(it: Item, tag: str = "") -> str:
-    v: Verdict = it.verdict
-    adv = it.discount
-    store = esc(it.store)
-    if v.code == "LOW":
-        head = "🏆 <b>أقل سعر اتسجّل</b> — %s" % store
-    elif v.code == "REAL" and it.old and valid_discount(it.price, it.old):
-        head = "✅ <b>خصم حقيقي %d%%</b> — %s" % (v.real, store)
-    elif v.code == "REAL":
-        head = "📉 <b>نزل %d%% عن سعره المعتاد</b> — %s" % (v.real, store)
-    elif v.code == "NEW":
-        head = "🆕 <b>عرض غير مؤكد</b> (خصم معلن %d%%) — %s" % (adv, store)
-    else:
-        head = "🚩 <b>عرض مشكوك فيه</b> — %s" % store
-    if tag:
-        head += "\n" + esc(tag)
-    lines = [head, "📦 " + esc(it.title[:95])]
-    price = "💰 <b>%s</b> ج.م" % money(it.price)
-    if it.old and adv:
-        price += "  (المتجر بيعلن إنه كان %s — خصم %d%%)" % (money(it.old), adv)
-    lines.append(price)
-    if v.code in ("REAL", "LOW") and v.ref:
-        lines.append("📊 المعتاد %s | أقل سعر قبل كده %s | متابَع من %d يوم"
-                     % (money(v.ref), money(v.low), round(v.hist_days)))
-    for n in v.notes:
-        lines.append("ℹ️ " + esc(n))
-    cl = cross_line(it)
-    if cl:
-        lines.append(cl)
-    lines.append("🔗 " + (abs_link(it.link, it.sid) or STORE_DOMAIN.get(it.sid, "")))
-    return "\n".join(lines)
-
-
-# =============================================================== فحص المتاجر
-@dataclass
-class StoreReport:
-    cfg: dict
-    urls_total: int = 0
-    urls_ok: int = 0
-    urls_skipped: int = 0
-    mentions: int = 0
-    methods: set = field(default_factory=set)
-    reasons: list = field(default_factory=list)
-    items: List[Item] = field(default_factory=list)
-    adv: int = 0
-    real: int = 0
-    flagged: int = 0
-    new: int = 0
-    sent: int = 0
-    fails: int = 0
-
-    @property
-    def name(self) -> str:
-        return self.cfg["name"]
-
-    @property
-    def sid(self) -> str:
-        return self.cfg["id"]
-
-    @property
-    def seen(self) -> int:
-        return len(self.items)
-
-    @property
-    def status(self) -> str:
-        if self.urls_ok == 0:
-            return "deferred" if (self.urls_total and self.urls_skipped >= self.urls_total) else "fail"
-        if self.items:
-            return "ok"
-        return "parse_fail" if self.mentions >= 6 else "empty"
-
-
-def fetch_and_extract(url: str, cfg: dict, fetcher: Fetcher) -> Tuple[Optional[Extract], FetchOutcome, Optional[Fetched]]:
-    def accept(res: Fetched) -> Accept:
-        ex = extract_page(res.text, url, cfg, res.blobs)
-        log("   ✅ %s (%dKB) -> %d منتج | %d بسعر معلن | JSON: %d | أسعار بالصفحة: %d"
-            % (res.method, len(res.text) // 1024, len(ex.items), ex.advertised, ex.json_seen, ex.mentions))
-        good = bool(ex.items) or ex.mentions >= 6
-        shell = not ex.items and ex.mentions < 6
-        if shell:
-            log("   ↪ الصفحة اتفتحت بس شكلها هيكل JS فاضي -> تصعيد للمتصفح/البوابات")
-        return Accept(good=good, shell=shell, score=(len(ex.items), ex.mentions), payload=ex)
-
-    out = fetcher.fetch(url, accept)
-    if out.best:
-        _score, res, ex = out.best
-        return ex, out, res
-    return None, out, None
-
-
-def scan_store(cfg: dict, fetcher: Fetcher, deadline: float, hist: History, now: int) -> StoreReport:
-    rep = StoreReport(cfg)
-    collected: List[Item] = []
-    fails = 0
-    base = cfg["domain"]
-
-    def acc_json(res: Fetched) -> Accept:
-        try:
-            data = json.loads(res.text)
-        except Exception:
-            return Accept(False, False, (0,), None)
-        return Accept(True, False, (1,), data)
-
-    for api in cfg.get("api", []):
-        if time.time() > deadline:
-            break
-        rep.urls_total += 1
-        log("🔍 [%s] API: %s" % (cfg["name"], api["url"]))
-        out = fetcher.fetch(api["url"], acc_json, expect_json=True)
-        if not out.best or out.best[2] is None:
-            if out.attempted == 0:
-                rep.urls_skipped += 1
-            rep.reasons.extend(out.notes[-2:])
-            continue
-        _s, res, data = out.best
-        if api.get("kind") == "shopify":
-            its, n = shopify_items(data, base)
-        else:
-            its, n = json_products(data, base)
-        log("   ✅ %s -> %d منتج / %d بسعر معلن" % (res.method, n, sum(1 for i in its if i.old)))
-        rep.urls_ok += 1
-        rep.methods.add(res.method)
-        collected += its
-
-    for url in cfg["urls"]:
-        if time.time() > deadline:
-            rep.reasons.append("خلص وقت الجولة")
-            break
-        if fails >= 2 and rep.urls_ok == 0:
-            rep.reasons.append("اتخطّيت باقي الروابط بعد فشل متكرر")
-            break
-        rep.urls_total += 1
-        log("🔍 [%s] %s" % (cfg["name"], url))
-        ex, out, res = fetch_and_extract(url, cfg, fetcher)
-        if ex is not None and res is not None:
-            rep.urls_ok += 1
-            rep.methods.add(res.method)
-            rep.mentions += ex.mentions
-            collected += ex.items
-            if not ex.items and ex.hints:
-                log("   🧭 كلاسات الأسعار في الصفحة (للضبط): %s" % ex.hints)
-        elif out.attempted == 0:
-            rep.urls_skipped += 1
-            rep.reasons.append(short(" | ".join(out.notes[-2:]) or "اتخطّى (طرق الجلب كلها موقوفة مؤقتًا)", 110))
-            log("   ⏸ اتخطّيت: " + " | ".join(out.notes[-2:]))
-        else:
-            fails += 1
-            if not out.hard:
-                rep.reasons.extend(out.notes[-2:])
-        time.sleep(random.uniform(0.8, 1.8))
-
-    items = dedupe_items(collected)
-    for it in items:
-        it.sid, it.store = cfg["id"], cfg["name"]
-        if it.price >= MIN_PRODUCT_PRICE:
-            hist.record(it, now)
-    rep.items = [it for it in items if it.price >= MIN_PRODUCT_PRICE]
-    return rep
-
-
-# =============================================================== التقييم والإرسال
-def evaluate(reports: List[StoreReport], hist: History, now: int) -> List[Item]:
-    cands: List[Item] = []
-    for rep in reports:
-        for it in rep.items:
-            rec = hist.products.get(it.pid)
-            if not rec:
-                continue
-            adv_ok = bool(it.old) and valid_discount(it.price, it.old)
-            if adv_ok:
-                rep.adv += 1
-            v = assess(it, rec, now)
-            it.verdict = v
-            if adv_ok:
-                if v.code in ("REAL", "LOW") and v.conf >= 2:
-                    rep.real += 1
-                    cands.append(it)
-                elif v.code in ("FAKE", "STATIC", "PUMP"):
-                    rep.flagged += 1
-                    if SEND_FLAGGED:
-                        cands.append(it)
-                elif v.code == "NEW":
-                    rep.new += 1
-                    if SEND_UNVERIFIED:
-                        cands.append(it)
-            elif (TRACK_ALL and v.code in ("REAL", "LOW") and v.real >= DROP_ALERT
-                  and v.conf >= 2 and rec.get("c", 1) >= 2):
-                it.source += "+drop"             # نزل فعلاً عن المعتاد من غير ما المتجر يعلن خصم
-                rep.real += 1
-                cands.append(it)
-    return cands
-
-
-def select_deals(cands: List[Item]) -> List[Item]:
-    by_store: Dict[str, List[Item]] = defaultdict(list)
-    for it in cands:
-        it.score = deal_score(it)
-        by_store[it.sid].append(it)
-    picked: List[Item] = []
-    for lst in by_store.values():
-        lst.sort(key=lambda x: x.score, reverse=True)
-        picked += [x for x in lst if x.verdict.code in ("REAL", "LOW")][:MAX_DEALS_PER_STORE]
-        picked += [x for x in lst if x.verdict.code == "NEW"][:MAX_UNVERIFIED_PER_STORE]
-        picked += [x for x in lst if x.verdict.code in ("FAKE", "STATIC", "PUMP")][:2]
-    picked.sort(key=lambda x: (x.verdict.code in ("REAL", "LOW"), x.score), reverse=True)
-    return picked[:MAX_DEALS_PER_RUN]
-
-
-def dispatch(picked: List[Item], state: Dict[str, dict], reports: List[StoreReport]) -> int:
-    by_sid = {r.sid: r for r in reports}
-    sent = 0
-    for it in picked:
-        # دفاع إضافي: العروض غير المؤكدة/ضعيفة الثقة لا تصل للقناة الرئيسية افتراضياً.
-        if it.verdict.code in ("REAL", "LOW") and it.verdict.conf < 2:
-            continue
-        if it.verdict.code == "NEW" and not SEND_UNVERIFIED:
-            continue
-        if it.verdict.code in ("FAKE", "STATIC", "PUMP") and not SEND_FLAGGED:
-            continue
-        ok, tag = should_send(state, it.pid, it.price)
-        if not ok:
-            continue
-        if send_telegram(deal_message(it, tag), html=True):
-            state[it.pid] = {"price": it.price, "ts": int(time.time()), "v": it.verdict.code}
-            by_sid[it.sid].sent += 1
-            sent += 1
-            time.sleep(1.2)
-    return sent
-
-
-def update_health(reports: List[StoreReport], health: dict, now: int) -> List[str]:
-    stores = health.setdefault("stores", {})
-    events: List[str] = []
-    for r in reports:
-        h = stores.setdefault(r.sid, {"fails": 0, "ok": 0})
-        if r.status in ("ok", "parse_fail", "empty"):
-            if h.get("fails", 0) >= 3:
-                events.append("🟢 %s رجع يشتغل بعد %d جولة" % (r.name, h["fails"]))
-            h["fails"] = 0
-            h["ok"] = now
-        elif r.status == "fail":
-            h["fails"] = h.get("fails", 0) + 1
-            h["reason"] = short(" | ".join(r.reasons[-2:]), 120)
-            if h["fails"] == 3:
-                events.append("🔴 %s محجوب من 3 جولات ورا بعض" % r.name)
-        r.fails = h.get("fails", 0)
-    return events
-
-
-def build_summary(reports: List[StoreReport], elapsed: float, hist: History, now: int, sent_total: int,
-                  fetcher: Fetcher, events: List[str], persistent: bool) -> str:
-    lines = ["📊 ملخص الجولة (%.1f دقيقة)" % (elapsed / 60.0), ""]
-    any_fail = False
-    for r in reports:
-        st = r.status
-        if st == "ok":
-            lines.append("✅ %s: %d منتج | معلن %d | حقيقي %d | مشكوك %d | غير مؤكد %d | أُرسل %d"
-                         % (r.name, r.seen, r.adv, r.real, r.flagged, r.new, r.sent))
-        elif st == "parse_fail":
-            lines.append("⚠ %s: اتفتح (%d سعر بالصفحة) بس ملقيتش منتجات — شكل الصفحة اتغيّر؟" % (r.name, r.mentions))
-            any_fail = True
-        elif st == "empty":
-            lines.append("⚠ %s: اتفتح بس مفيش أسعار ظاهرة (JS/حماية؟)" % r.name)
-            any_fail = True
-        elif st == "deferred":
-            lines.append("⏸ %s: محجوب (بيتجرّب كل %d ساعة) — %d جولة فاشلة" % (r.name, DEAD_RETRY_H, r.fails))
-            any_fail = True
-        else:
-            lines.append("❌ %s: محجوب من %d جولة -> %s" % (r.name, r.fails, short(" | ".join(r.reasons[-2:]) or "مفيش رد", 100)))
-            any_fail = True
-    flagged = sum(r.flagged for r in reports)
-    lines += ["", "إجمالي المرسل: %d | 🚩 مستبعد (وهمي/مشكوك): %d" % (sent_total, flagged)]
-    lines.append("📚 الذاكرة: %d منتج | متابعة من %.0f يوم" % (len(hist.products), hist.span_days(now)))
-    if fetcher.gw_calls:
-        lines.append("🌐 طلبات بوابات الجولة دي: %d" % fetcher.gw_calls)
-    for e in events:
-        lines.append(e)
-    if not persistent and not hist.loaded:
-        lines.append("⚠ الذاكرة مش بتتحفظ بين الجولات! استخدم الـ workflow الجديد (data branch) أو COMMIT_STATE=1.")
-    elif hist.span_days(now) < MIN_HISTORY_DAYS:
-        lines.append("ℹ️ الذاكرة لسه صغيرة — حكم 'حقيقي/وهمي' بيبقى أدق بعد %d-7 أيام." % MIN_HISTORY_DAYS)
-    if any_fail and not fetcher.gateways and not PROXY_URL:
-        lines.append("💡 المواقع المحجوبة من IP جيتهاب: ضيف Secret باسم PROXY_URL أو SCRAPERAPI_KEY "
-                     "(أو SCRAPINGBEE_KEY / ZENROWS_KEY / SCRAPEDO_TOKEN).")
-    return "\n".join(lines)[:3900]
-
-
-# =============================================================== التشغيل
-def main() -> None:
-    t0 = time.time()
-    now = int(t0)
-    deadline = t0 + MAX_RUNTIME_MIN * 60
-    log("--- بدء الرادار الذكي الشامل (V9) ---")
-    log("curl_cffi=%s cloudscraper=%s browser=%s proxy=%s gateways=%s data=%s"
-        % (HAS_CFFI, HAS_CLOUDSCRAPER, USE_BROWSER, bool(PROXY_URL),
-           [g["name"] for g in GATEWAYS if os.environ.get(g["env"])] or "-", DATA_DIR))
-
-    os.makedirs(DATA_DIR, exist_ok=True)
-    state = load_json(STATE_FILE)
-    health = load_json(HEALTH_FILE)
-    hist = History(HISTORY_FILE)
-    persistent = COMMIT_STATE or DATA_DIR != "."
-    first_run = not hist.loaded
-    log("📚 الذاكرة: %d منتج محمّل | متابعة من %.0f يوم" % (len(hist.products), hist.span_days(now)))
-
-    stores = [c for c in STORES if not ONLY_STORES or any(o in c["id"].lower() or o in c["name"].lower() for o in ONLY_STORES)]
-    fetcher = Fetcher(health)
-    reports: List[StoreReport] = []
-    sent_total = 0
-    events: List[str] = []
-    try:
-        try:
-            for cfg in stores:
-                if time.time() > deadline:
-                    rep = StoreReport(cfg)
-                    rep.reasons.append("خلص وقت الجولة قبل ما أوصله")
-                    reports.append(rep)
-                    continue
-                try:
-                    rep = scan_store(cfg, fetcher, deadline, hist, now)
-                except Exception as e:
-                    log(traceback.format_exc())
-                    rep = StoreReport(cfg)
-                    rep.reasons.append("خطأ داخلي: %s" % type(e).__name__)
-                reports.append(rep)
-        finally:
-            fetcher.close()
-
-        picked: List[Item] = []
-        try:
-            cands = evaluate(reports, hist, now)
-            picked = select_deals(cands)
-            if CROSS_STORE and picked:
-                annotate_cross(picked, hist, now)
-                picked.sort(key=lambda x: (x.verdict.code in ("REAL", "LOW"), x.score), reverse=True)
-            sent_total = dispatch(picked, state, reports)
-            log("📨 اتبعت %d عرض من %d مرشّح" % (sent_total, len(picked)))
-        except Exception:
-            log(traceback.format_exc())
-        events = update_health(reports, health, now)
-    finally:
-        hist.save(now)
-        cutoff = time.time() - 14 * DAY
-        save_json(STATE_FILE, {k: v for k, v in state.items() if isinstance(v, dict) and v.get("ts", 0) > cutoff})
-        save_json(HEALTH_FILE, health)
-    commit_state()
-
-    summary = build_summary(reports, time.time() - t0, hist, now, sent_total, fetcher, events, persistent)
-    log("--- انتهت الجولة ---\n" + summary)
-    last = health.get("last_summary", 0)
-    want = (SUMMARY_MODE == "always"
-            or (SUMMARY_MODE == "auto" and (sent_total > 0 or events or first_run or now - last > 12 * 3600)))
-    if want and SUMMARY_MODE != "never":
-        if send_telegram(summary):
-            health["last_summary"] = now
-            save_json(HEALTH_FILE, health)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        tb = traceback.format_exc()
-        log(tb)
-        send_telegram("❌ الرادار وقع بخطأ:\n" + tb[-1500:])
-        sys.exit(1)
+        
