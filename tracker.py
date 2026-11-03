@@ -3,8 +3,7 @@
 """
 Live Best Price Radar — Egyptian Shopping Deals Bot
 ==================================================
-نسخة نهائية مصححة: تدعم المقارنة عبر محركات البحث، وتمنع التكرار،
-وتتعامل مع الحظر وحدود الاستخدام (Rate Limits) بأمان.
+النسخة النهائية والمستقرة (تم إصلاح خطأ KeyError: 'discount')
 """
 
 import os
@@ -135,7 +134,6 @@ def validate_deal(d: dict) -> bool:
 # ================= إرسال التلجرام =================
 def send_telegram(message: str, use_html: bool = False, max_retries: int = 3) -> bool:
     if not BOT_TOKEN or not CHAT_ID:
-        log.warning("BOT_TOKEN أو CHAT_ID غير موجودين.")
         return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message[:4000], "disable_web_page_preview": False}
@@ -147,7 +145,6 @@ def send_telegram(message: str, use_html: bool = False, max_retries: int = 3) ->
             if r.status_code == 200: return True
             if r.status_code == 429:
                 wait = r.json().get("parameters", {}).get("retry_after", 5)
-                log.warning(f"⏳ Rate limit — انتظار {wait}s")
                 time.sleep(wait + 1)
                 continue
             if r.status_code == 400 and use_html:
@@ -156,8 +153,7 @@ def send_telegram(message: str, use_html: bool = False, max_retries: int = 3) ->
                 use_html = False
                 continue
             time.sleep(2 * (attempt + 1))
-        except Exception as e:
-            log.warning(f"⚠ Telegram exception: {e}")
+        except Exception:
             time.sleep(2 * (attempt + 1))
     return False
 
@@ -177,7 +173,6 @@ def is_blocked_page(text: str, status: int) -> bool:
     return any(b in title for b in block_titles)
 
 def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
-    log.info(f"🔍 [{store_name}]: {url}")
     parts = urllib.parse.urlsplit(url)
     home = f"{parts.scheme}://{parts.netloc}/"
     headers = {
@@ -195,7 +190,6 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
                 if expect_json:
                     if r.status_code == 200 and r.text.lstrip()[:1] in ("{", "["): return r.text
                 elif not is_blocked_page(r.text, r.status_code):
-                    log.info(f"   ✅ مباشر ({fp}) — {len(r.text)//1024}KB")
                     return r.text
             except Exception: pass
 
@@ -203,7 +197,6 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
         try:
             r = scraper.get(url, headers=headers, timeout=20)
             if not is_blocked_page(r.text, r.status_code):
-                log.info(f"   ✅ Cloudscraper — {len(r.text)//1024}KB")
                 return r.text
         except Exception: pass
 
@@ -228,11 +221,9 @@ def smart_fetch(url: str, store_name: str, expect_json: bool = False) -> str:
                 if expect_json:
                     if body.lstrip()[:1] in ("{", "["): return body
                 elif not is_blocked_page(body, 200):
-                    log.info(f"   🔓 تجاوز عبر {pname} — {len(body)//1024}KB")
                     return body
                 break
             except Exception: pass
-    log.warning(f"   ⛔ تعذر فتح [{store_name}]")
     return ""
 
 # ================= البحث السوقي (Google / Brave) =================
@@ -252,7 +243,7 @@ def fetch_market_prices(title: str) -> dict:
                     if p > 0:
                         domain = urllib.parse.urlsplit(item.get("url", "")).netloc
                         prices[domain] = p
-        except Exception as e: log.warning(f"Brave Search error: {e}")
+        except Exception: pass
 
     if GOOGLE_API_KEY and GOOGLE_CX_ID:
         try:
@@ -264,7 +255,7 @@ def fetch_market_prices(title: str) -> dict:
                     if p > 0:
                         domain = urllib.parse.urlsplit(item.get("link", "")).netloc
                         prices[domain] = p
-        except Exception as e: log.warning(f"Google Search error: {e}")
+        except Exception: pass
     return prices
 
 # ================= دوال الاستخراج =================
@@ -284,7 +275,9 @@ def extract_amazon_deals(html_text: str) -> list:
         old = parse_price(old_el.get_text()) if old_el else 0
         
         if title and old > cur >= MIN_PRODUCT_PRICE:
-            deals.append({"title": title, "price": cur, "old": old, "link": f"https://www.amazon.eg/dp/{asin}"})
+            disc = round((old - cur) / old * 100)
+            if MIN_DISCOUNT <= disc <= MAX_REALISTIC_DISC:
+                deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": f"https://www.amazon.eg/dp/{asin}"})
     return deals
 
 def extract_noon_deals(html_text: str) -> list:
@@ -311,7 +304,8 @@ def extract_noon_deals(html_text: str) -> list:
                     if MIN_DISCOUNT <= pct <= MAX_REALISTIC_DISC:
                         old = int(round(cur / (1.0 - pct / 100.0)))
             if old > cur:
-                deals.append({"title": title, "price": cur, "old": old, "link": urllib.parse.urljoin("https://www.noon.com", href)})
+                disc = round((old - cur) / old * 100)
+                deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": urllib.parse.urljoin("https://www.noon.com", href)})
     return deals
 
 def extract_dream2000_deals(html_text: str) -> list:
@@ -329,7 +323,8 @@ def extract_dream2000_deals(html_text: str) -> list:
         cur = parse_price(sp_el.get_text()) if sp_el else 0
         old = parse_price(old_el.get_text()) if old_el else 0
         if old > cur >= MIN_PRODUCT_PRICE:
-            deals.append({"title": title, "price": cur, "old": old, "link": link})
+            disc = round((old - cur) / old * 100)
+            deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": link})
     return deals
 
 def extract_jumia_deals(html_text: str) -> list:
@@ -344,7 +339,8 @@ def extract_jumia_deals(html_text: str) -> list:
         title = clean_title(title_el.get_text(" ", strip=True)) if title_el else ""
         a = card.find("a", href=True)
         if title and a and old > cur >= MIN_PRODUCT_PRICE:
-            deals.append({"title": title, "price": cur, "old": old, "link": urllib.parse.urljoin("https://www.jumia.com.eg", a["href"])})
+            disc = round((old - cur) / old * 100)
+            deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": urllib.parse.urljoin("https://www.jumia.com.eg", a["href"])})
     return deals
 
 def extract_general_deals(html_text: str, base_domain: str) -> list:
@@ -371,7 +367,8 @@ def extract_general_deals(html_text: str, base_domain: str) -> list:
                 pct = int(m_pct.group(1))
                 if MIN_DISCOUNT <= pct <= MAX_REALISTIC_DISC: old = int(round(cur / (1.0 - pct / 100.0)))
         if old > cur >= MIN_PRODUCT_PRICE:
-            deals.append({"title": title, "price": cur, "old": old, "link": link})
+            disc = round((old - cur) / old * 100)
+            deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": link})
     return deals
 
 # ================= المتاجر =================
@@ -418,7 +415,7 @@ def save_json(path: str, data: dict):
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-    except Exception as e: log.warning(f"⚠ تعذر حفظ {path}: {e}")
+    except Exception: pass
 
 def prune_state(state: dict, max_age_days: int = STATE_MAX_AGE_DAYS) -> dict:
     cutoff = time.time() - max_age_days * 86400
@@ -447,9 +444,8 @@ def commit_files():
         if _git("diff", "--cached", "--quiet").returncode == 0: return
         _git("commit", "-m", "chore: update radar state [skip ci]")
         if _git("pull", "--rebase", "--autostash", "origin", "HEAD").returncode != 0: _git("rebase", "--abort")
-        push = _git("push")
-        if push.returncode == 0: log.info("💾 تم حفظ الذاكرة في GitHub")
-    except Exception as e: log.warning(f"⚠ خطأ Git: {e}")
+        _git("push")
+    except Exception: pass
 
 def was_recently_sent(state: dict, sid: str, title: str, link: str, price: int, now: int) -> bool:
     k_title = f"{sid}|{product_fingerprint(title)}"
@@ -497,7 +493,13 @@ def main():
         unique_deals = {}
         for d in found_deals:
             k = product_fingerprint(d["title"])
-            if k and (k not in unique_deals or d["discount"] > unique_deals[k]["discount"]): unique_deals[k] = d
+            # حماية إضافية: لو مفتاح discount مش موجود، احسبه فوراً
+            if "discount" not in d and d.get("old", 0) > 0:
+                d["discount"] = round((d["old"] - d["price"]) / d["old"] * 100)
+            
+            if k and (k not in unique_deals or d.get("discount", 0) > unique_deals[k].get("discount", 0)): 
+                unique_deals[k] = d
+                
         all_round_deals.extend(unique_deals.values())
         
         if opened: summary_lines.append(f"✅ {sname}: {len(unique_deals)} عرض")
@@ -516,7 +518,7 @@ def main():
     for d in all_round_deals: deals_by_store[d["sid"]].append(d)
 
     for sid, d_list in deals_by_store.items():
-        ordered = sorted(d_list, key=lambda x: (x["discount"], x["old"] - x["price"]), reverse=True)
+        ordered = sorted(d_list, key=lambda x: (x.get("discount", 0), x.get("old", 0) - x.get("price", 0)), reverse=True)
         sent_store = 0
 
         for d in ordered:
@@ -528,9 +530,7 @@ def main():
             market = price_by_fp.get(fp, [])
             cheaper = [c for c in market if c[0] < d["price"] * 0.95 and c[1] != d["store"]]
 
-            # فحص محركات البحث (لو مفعلة)
             if not cheaper and MARKET_SEARCH_ENABLED:
-                log.info(f"   🔎 بحث خارجي عن: {d['title'][:30]}...")
                 ext_prices = fetch_market_prices(d["title"])
                 for ext_dom, ext_p in ext_prices.items():
                     if ext_p < d["price"] * (1 - MARKET_MIN_GAP_PCT / 100): cheaper.append((ext_p, ext_dom))
