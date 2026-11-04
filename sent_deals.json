@@ -1568,8 +1568,8 @@
     "ts": 1793645330
   },
   "https://www.amazon.eg/dp/b0gnsjbnqm": {
-    "price": 1573,
-    "ts": 1793785894
+    "price": 1570,
+    "ts": 1793796245
   },
   "amazon|مسحوق غسيل اوتوماتيك برائحة اللافندر من اريال كجم": {
     "price": 444,
@@ -2072,8 +2072,8 @@
     "ts": 1793658597
   },
   "https://www.amazon.eg/dp/b0grbjtm54": {
-    "price": 18499,
-    "ts": 1793658597
+    "price": 18199,
+    "ts": 1793796245
   },
   "https://www.noon.com/egypt-ar/hot-70-ai-dual-sim-night-pulse-12gb-6-6-ram-128gb-4g-lte-middle-east-version/n70380847v/p": {
     "price": 11900,
@@ -2596,8 +2596,8 @@
     "ts": 1793785894
   },
   "https://www.raneen.com/ar/steel-center-table-80-80-45-cm-gold-atants-1-2bgld": {
-    "price": 4059,
-    "ts": 1793785894
+    "price": 3999,
+    "ts": 1793796245
   },
   "https://www.raneen.com/ar/steel-corner-table-50-40-cm-gold-white": {
     "price": 1238,
@@ -2610,5 +2610,9 @@
   "https://www.raneen.com/ar/side-table-steel-with-electrostatic-paint-mdf-wood-40-40-50-gold-aleasriast113gld": {
     "price": 1294,
     "ts": 1793785894
+  },
+  "https://2b.com.eg/ar/acer-aspire-lite-al15-53p-57eq-laptop-intelr-coretm-5-120u-16gb-512gb-ssd-intel-graphics-15-6-fhd-ips-60hz-light-silver.html": {
+    "price": 33099,
+    "ts": 1793796245
   }
 }
