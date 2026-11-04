@@ -309,8 +309,8 @@ def judge(text: str, status: int, expect_json: bool) -> str:
         return "HTTP %d%s" % (status, (" - " + blk) if blk else "")
     if blk:
         return blk
-    if len(text) < 1500:
-        return "صفحة قصيرة (%d)" % len(text)
+    if len(text) < 5000:
+        return "صفحة قصيرة (%d) غالباً حماية" % len(text)
     return ""
 
 
@@ -452,6 +452,7 @@ class Browser:
                 except Exception:
                     break
                 page.wait_for_timeout(700)
+            page.wait_for_timeout(2500)
             return page.content(), blobs, status or 200, "ok"
         except Exception as e:
             return "", blobs, status, "%s: %s" % (type(e).__name__, str(e)[:80])
@@ -967,7 +968,33 @@ def _pick_title(card) -> str:
     texts = [clean_title(a.get_text(" ", strip=True)) for a in _anchors(card)]
     texts = [_PRICE_RE.sub(" ", t.translate(_TRANS)).strip() for t in texts if t]
     texts = [t for t in texts if len(t) >= 6 and not _mostly_numeric(t)]
-    return max(texts, key=len) if texts else ""
+    if texts:
+        return max(texts, key=len)
+    loose = []
+    for x in card.find_all(string=True):
+        if type(x) is not NavigableString:
+            continue
+        t = clean_title(str(x))
+        low = t.lower()
+        if len(t) >= 12 and not _mostly_numeric(t) and not _PRICE_RE.search(t.translate(_TRANS)) \
+                and not any(w in low for w in COUPON_WORDS + INSTALLMENT_WORDS):
+            loose.append(t)
+    return max(loose, key=len) if loose else ""
+
+
+def _is_hidden(el) -> bool:
+    cur = el
+    for _ in range(5):
+        if cur is None or getattr(cur, "name", None) in (None, "html", "body", "[document]"):
+            break
+        attrs = cur.attrs or {}
+        cls = " ".join(attrs.get("class") or []).lower()
+        style = str(attrs.get("style", "")).replace(" ", "").lower()
+        if ("no-display" in cls or "d-none" in cls or "display:none" in style or attrs.get("hidden") is not None
+                or "hidden" in class_tokens(cls.split())):
+            return True
+        cur = cur.parent
+    return False
 
 
 def _digit_strings(el) -> int:
@@ -996,6 +1023,8 @@ def _price_entries(soup) -> list:
         els[id(el)] = el
     out = []
     for order, el in enumerate(els.values()):
+        if _is_hidden(el):
+            continue
         txt = el.get_text(" ", strip=True)
         low = txt.lower()
         if any(w in low for w in INSTALLMENT_WORDS) or any(w in low for w in COUPON_WORDS):
@@ -1040,6 +1069,14 @@ def html_products(soup, page_url: str) -> List[Product]:
         return []
     hcache: dict = {}
     groups: Dict[int, dict] = {}
+    cnt: Dict[int, int] = defaultdict(int)
+    for ent in entries:
+        c0 = ent[0].parent
+        for _i in range(10):
+            if c0 is None or c0.name in ("html", "body", "[document]"):
+                break
+            cnt[id(c0)] += 1
+            c0 = c0.parent
     for ent in entries:
         cur = ent[0].parent
         depth = 0
@@ -1047,7 +1084,7 @@ def html_products(soup, page_url: str) -> List[Product]:
         while cur is not None and cur.name not in ("html", "body", "[document]") and depth < 9:
             hs = _product_hrefs(cur, page_url, hcache)
             if hs:
-                card = cur if len(hs) == 1 else None
+                card = cur if (len(hs) == 1 or cnt[id(cur)] <= 4) else None
                 break
             cur = cur.parent
             depth += 1
@@ -1081,7 +1118,53 @@ def html_products(soup, page_url: str) -> List[Product]:
         top = max(e[3] for e in pool)
         best = [e for e in pool if e[3] == top]
         pick = max(best, key=lambda e: e[1]) if old else min(best, key=lambda e: e[4])
-        out.append(Product(title, pick[1], old, _pick_link(card, page_url) or page_url, "html"))
+        price = pick[1]
+        if not old:                                    # سعرين من غير تعليم "مشطوب": الأكبر هو القديم
+            vals = sorted({e[1] for e in best})
+            if len(vals) >= 2 and vals[0] >= vals[-1] * (1 - MAX_REALISTIC_DISC / 100.0):
+                price, old = vals[0], vals[-1]
+        out.append(Product(title, price, old, _pick_link(card, page_url) or page_url, "html"))
+    return out
+
+
+def anchor_products(soup, page_url: str) -> List[Product]:
+    """خطة بديلة: من كل لينك منتج اطلع للكارت واقرا الأسعار من النص (بيتجاهل الكوبون والقسط)."""
+    out: List[Product] = []
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        if not _is_prodlink(a):
+            continue
+        card = a
+        for _ in range(5):
+            if len(card.get_text(" ", strip=True)) >= 25 or card.parent is None:
+                break
+            card = card.parent
+        par = card.parent
+        if par is not None and par.name in ("li", "article", "div") and len(par.get_text(" ", strip=True)) < 500:
+            card = par
+        txt = card.get_text(" ", strip=True)
+        if not 15 <= len(txt) <= 700 or len(_product_hrefs(card, page_url, {})) > 1:
+            continue
+        cut = re.split(r"coupon|كوبون|استخدم|promo|قسط|تقسيط|installment|شهري", txt, flags=re.I)[0]
+        nums: List[int] = []
+        for m in _PRICE_RE.finditer(cut.translate(_TRANS)):
+            v = _to_int(m.group(1) or m.group(2))
+            if MIN_PRODUCT_PRICE <= v <= MAX_PRODUCT_PRICE and v not in nums:
+                nums.append(v)
+        if not nums:
+            continue
+        price, old = nums[0], 0
+        if len(nums) >= 2:
+            hi, lo = max(nums[:2]), min(nums[:2])
+            if lo >= hi * (1 - MAX_REALISTIC_DISC / 100.0):
+                price, old = lo, hi
+        title = _pick_title(card)
+        if not title or any(w in title.lower() for w in INSTALLMENT_WORDS):
+            continue
+        k = (norm_title(title), price)
+        if k not in seen:
+            seen.add(k)
+            out.append(Product(title, price, old, _pick_link(card, page_url) or page_url, "anchor"))
     return out
 
 
@@ -1147,9 +1230,9 @@ class Extract:
 def dedupe_products(items: List[Product]) -> List[Product]:
     out: List[Product] = []
     seen_keys = set()
-    for it in items:
+    for it in sorted(items, key=lambda x: (0 if x.old else 1, x.price)):   # اللي عليه سعر قديم الأول
         k1 = (norm_title(it.title), it.price)
-        k2 = clean_link(it.link) if it.link else None
+        k2 = clean_link(it.link) if it.link and len(urllib.parse.urlsplit(it.link).path.strip("/")) > 1 else None
         if k1 in seen_keys or (k2 and k2 in seen_keys):
             continue
         seen_keys.add(k1)
@@ -1174,9 +1257,11 @@ def extract_page(html: str, url: str, cfg: dict, blobs=()) -> Extract:
         its, n = json_products(blob, base, link_fn)
         found += its
         ex.json_seen += n
+    ex.mentions = price_mentions(soup.get_text(" ", strip=True))
     if not (adapter == "amazon" and found):
         found += html_products(soup, url)
-    ex.mentions = price_mentions(soup.get_text(" ", strip=True))
+        if ex.mentions >= 6 and sum(1 for p in found if p.source in ("html", "anchor")) * 4 < ex.mentions:
+            found += anchor_products(soup, url)
     ex.products = dedupe_products(found)
     if not ex.products and ex.mentions >= 6:
         ex.hints = price_class_hints(soup)
@@ -1309,12 +1394,7 @@ STORES: List[dict] = [
      ]},
     {"name": "بي تك (B.Tech)", "adapter": "generic", "domain": "https://btech.com",
      "search": "https://btech.com/ar/catalogsearch/result/?q={q}",
-     "urls": [
-         "https://btech.com/ar/daily-deals",
-         "https://btech.com/ar/mobyilat.html",
-         "https://btech.com/ar/tv-home-theater.html",
-         "https://btech.com/ar/",
-     ]},
+     "urls": ["https://btech.com/ar/"]},
     {"name": "2B Egypt", "adapter": "generic", "domain": "https://2b.com.eg",
      "search": "https://2b.com.eg/ar/catalogsearch/result/?q={q}",
      "urls": ["https://2b.com.eg/ar/deals.html", "https://2b.com.eg/ar/computers.html"]},
@@ -1600,6 +1680,10 @@ def save_json(path: str, data: dict) -> None:
 
 
 def update_history(history: dict, products: List[Product], now: float) -> None:
+    for k in list(history.keys()):                 # تنظيف صيغة قديمة (V12) لو موجودة
+        v = history[k]
+        if not isinstance(v, dict) or not all(isinstance(x, list) and all(isinstance(pt, list) and len(pt) == 2 for pt in x) for x in v.values()):
+            del history[k]
     for p in products:
         if not p.keys or "r" in p.flags:
             continue
@@ -1758,6 +1842,7 @@ def main() -> None:
 
     state = load_json(STATE_FILE)
     history = load_json(HISTORY_FILE)
+    history = {k: v for k, v in history.items() if isinstance(v, dict) and all(isinstance(x, list) for x in v.values())}
     fetcher = Fetcher()
     reports: List[StoreReport] = []
     try:
@@ -1817,8 +1902,11 @@ def main() -> None:
             rep.sent += 1
             time.sleep(1.2)
 
-    update_history(history, universe, now)
     save_json(STATE_FILE, state)
+    try:
+        update_history(history, universe, now)
+    except Exception:
+        log(traceback.format_exc())
     save_json(HISTORY_FILE, history)
     commit_files()
 
