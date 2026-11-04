@@ -1568,8 +1568,8 @@
     "ts": 1793645330
   },
   "https://www.amazon.eg/dp/b0gnsjbnqm": {
-    "price": 1570,
-    "ts": 1793796245
+    "price": 1550,
+    "ts": 1793817799
   },
   "amazon|مسحوق غسيل اوتوماتيك برائحة اللافندر من اريال كجم": {
     "price": 444,
@@ -2488,8 +2488,8 @@
     "ts": 1793704746
   },
   "https://www.noon.com/egypt-ar/dedica-coffee-machine-barista-pump-espresso-and-cappuccino-maker-ground-coffee-and-ese-pods-can-be-used-milk-frother-for-latte-macchiato-and-more-1-1-l-1450-w-ec685-m-silver-black/n18169158a/p": {
-    "price": 8411,
-    "ts": 1793704746
+    "price": 8399,
+    "ts": 1793817799
   },
   "noon|ستانلي كوب استانلس كوب استانلس سعة 40 اونصه مع شاليموه ومقبض كوب معزول مع غطاء كوب للسفر كوب قهوة من الفولاذ المقاوم للصدأ للمشروبات المثلجة الساخنة كوب سفر بمقبض": {
     "price": 584,
@@ -2614,5 +2614,9 @@
   "https://2b.com.eg/ar/acer-aspire-lite-al15-53p-57eq-laptop-intelr-coretm-5-120u-16gb-512gb-ssd-intel-graphics-15-6-fhd-ips-60hz-light-silver.html": {
     "price": 33099,
     "ts": 1793796245
+  },
+  "https://www.amazon.eg/dp/b0btx9yfgz": {
+    "price": 157,
+    "ts": 1793817799
   }
 }
