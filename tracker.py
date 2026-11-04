@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, sys, time, json, re, random, html as htmllib, subprocess, urllib.parse
-from collections import defaultdict
 
-print("⚡ بدء تشغيل رادار العروض المباشرة (V15)...", flush=True)
+print("⚡ بدء تشغيل رادار العروض المباشرة مع الحفظ الدائم (V16)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -28,6 +27,7 @@ MIN_DISCOUNT = int(os.environ.get("MIN_DISCOUNT", 15))           # أقل خصم
 MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 75)) # منع الأقساط والنسب الخيالية
 MIN_PRODUCT_PRICE = int(os.environ.get("MIN_PRODUCT_PRICE", 150)) # استبعاد الإكسسوارات الزهيدة
 MAX_DEALS_PER_STORE = int(os.environ.get("MAX_DEALS_PER_STORE", 8)) # إرسال حتى 8 عروض قوية من كل متجر
+REALERT_DAYS = 5                                                 # منع تكرار نفس العرض لمدة 5 أيام
 
 STATE_FILE = "sent_deals.json"
 UA_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -245,33 +245,6 @@ def extract_noon_deals(html_text: str) -> list:
                 deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": link})
     return deals
 
-def extract_dream2000_deals(html_text: str) -> list:
-    deals = []
-    soup = BeautifulSoup(html_text, "html.parser")
-    for card in soup.find_all("li", class_=re.compile(r"product-item")):
-        for inst_tag in card.find_all(class_=re.compile(r"installment|tabby|tamara|monthly", re.I)):
-            inst_tag.decompose()
-
-        a = card.find("a", class_=re.compile(r"product-item-link|photo")) or card.find("a", href=True)
-        if not a:
-            continue
-        link = a["href"].strip()
-        title = clean_title(a.get_text(" ", strip=True) or a.get("title") or "")
-        if len(title) < 6:
-            continue
-
-        sp_el = card.find("span", {"data-price-type": "finalPrice"}) or card.find(class_=re.compile(r"special-price"))
-        old_el = card.find("span", {"data-price-type": "oldPrice"}) or card.find(class_=re.compile(r"old-price"))
-
-        cur = parse_price(sp_el.get_text()) if sp_el else 0
-        old = parse_price(old_el.get_text()) if old_el else 0
-
-        if old > cur >= MIN_PRODUCT_PRICE:
-            disc = round((old - cur) / old * 100)
-            if MIN_DISCOUNT <= disc <= MAX_REALISTIC_DISC:
-                deals.append({"title": title, "price": cur, "old": old, "discount": disc, "link": link})
-    return deals
-
 def extract_general_deals(html_text: str, base_domain: str) -> list:
     deals = []
     soup = BeautifulSoup(html_text, "html.parser")
@@ -324,7 +297,6 @@ STORES = [
      "urls": [
          "https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc",
          "https://www.noon.com/egypt-ar/home-and-kitchen/?sort[by]=discount&sort[dir]=desc",
-         "https://www.noon.com/egypt-ar/electronics-and-mobiles/mobiles-and-accessories/mobiles-20905/?sort[by]=discount&sort[dir]=desc"
      ]},
     {"id": "2b", "name": "2B Egypt", "domain": "https://2b.com.eg", "type": "general",
      "urls": [
@@ -334,31 +306,6 @@ STORES = [
     {"id": "raneen", "name": "رنين (Raneen)", "domain": "https://www.raneen.com", "type": "general",
      "urls": [
          "https://www.raneen.com/ar/deals"
-     ]},
-    {"id": "dream2000", "name": "دريم 2000 (Dream 2000)", "domain": "https://dream2000.com", "type": "dream2000",
-     "urls": [
-         "https://dream2000.com/offers.html",
-         "https://dream2000.com/mobiles.html"
-     ]},
-    {"id": "kenzz", "name": "كنز (Kenzz)", "domain": "https://kenzz.com", "type": "general",
-     "urls": [
-         "https://kenzz.com/ar"
-     ]},
-    {"id": "raya", "name": "راية شوب (Raya Shop)", "domain": "https://www.rayashop.com", "type": "general",
-     "urls": [
-         "https://www.rayashop.com/ar/deals"
-     ]},
-    {"id": "btech", "name": "بي تك (B.Tech)", "domain": "https://btech.com", "type": "general",
-     "urls": [
-         "https://btech.com/ar/daily-deals"
-     ]},
-    {"id": "jumia", "name": "جوميا مصر (Jumia)", "domain": "https://www.jumia.com.eg", "type": "general",
-     "urls": [
-         "https://www.jumia.com.eg/ar/flash-sales/"
-     ]},
-    {"id": "dubaiphone", "name": "دبي فون (Dubai Phone)", "domain": "https://www.dubaiphone.net", "type": "general",
-     "urls": [
-         "https://www.dubaiphone.net/ar/deals"
      ]}
 ]
 
@@ -374,15 +321,30 @@ def load_json(path: str) -> dict:
 def save_json(path: str, data: dict):
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log(f"⚠ تعذر حفظ {path}: {e}")
+
+def commit_state():
+    """حفظ دائم للملفات في ريبو جيتهاب لعدم فقدان الذاكرة."""
+    try:
+        subprocess.run(["git", "config", "user.name", "deals-radar[bot]"], check=False)
+        subprocess.run(["git", "config", "user.email", "deals-radar@users.noreply.github.com"], check=False)
+        if os.path.exists(STATE_FILE):
+            subprocess.run(["git", "add", STATE_FILE], check=False)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], check=False).returncode != 0:
+            subprocess.run(["git", "commit", "-m", "chore: persist sent deals memory [skip ci]"], check=False)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
+            r = subprocess.run(["git", "push"], check=False)
+            log("💾 تم حفظ الذاكرة في مستودع GitHub بنجاح لمنع التكرار.")
+    except Exception as e:
+        log(f"⚠ خطأ أثناء حفظ الذاكرة للريبو: {e}")
 
 # ================= حلقة التشغيل الرئيسية =================
 def main():
     t0 = time.time()
     now = int(t0)
-    log("🚀 بدأ رادار الصفقات المباشرة والإرسال الفوري...")
+    log("🚀 بدأ رادار الصفقات مع تفعيل الذاكرة الدائمة...")
     state = load_json(STATE_FILE)
 
     summary_lines = ["📊 <b>ملخص جولة الصفقات الحية</b>", ""]
@@ -390,7 +352,6 @@ def main():
 
     for st in STORES:
         sname = st["name"]
-        sid = st["id"]
         stype = st.get("type", "general")
         found_deals = []
         opened = False
@@ -403,15 +364,13 @@ def main():
                     extracted = extract_amazon_deals(html_txt)
                 elif stype == "noon":
                     extracted = extract_noon_deals(html_txt)
-                elif stype == "dream2000":
-                    extracted = extract_dream2000_deals(html_txt)
                 else:
                     extracted = extract_general_deals(html_txt, st["domain"])
 
                 found_deals.extend(extracted)
             time.sleep(random.uniform(0.6, 1.2))
 
-        # ترتيب العروض من الأعلى خصماً وتوفيراً
+        # ترتيب العروض وتصفية المتكرر في نفس الصفحة
         unique_deals = {}
         for d in found_deals:
             k = norm_title(d["title"])
@@ -425,15 +384,19 @@ def main():
             if sent_store >= MAX_DEALS_PER_STORE:
                 break
 
-            # فحص الذاكرة لمنع تكرار نفس الرابط في آخر 18 ساعة فقط
-            k_link = d["link"].split("?")[0].rstrip("/").lower()
-            prev = state.get(k_link)
-            if prev and (now - prev.get("ts", 0)) < 18 * 3600:
-                continue
+            # التحقق الدائم: الرابط النظيف للمنتج
+            clean_link = d["link"].split("?")[0].rstrip("/").lower()
+            prev = state.get(clean_link)
+
+            # إذا تم إرساله من قبل خلال 5 أيام وبنفس السعر، يتم تخطيه
+            if prev:
+                age_days = (now - prev.get("ts", 0)) / 86400.0
+                if age_days < REALERT_DAYS and d["price"] >= prev.get("price", d["price"]):
+                    continue
 
             saving = d["old"] - d["price"]
             msg = (
-                f"🔥 <b>عرض قوي من {htmllib.escape(sname)}</b> (خصم {d['discount']}%)\n\n"
+                f"🔥 <b>عرض جديد من {htmllib.escape(sname)}</b> (خصم {d['discount']}%)\n\n"
                 f"📦 {htmllib.escape(d['title'])}\n"
                 f"💰 السعر الحالي: <b>{d['price']:,} ج.م</b>\n"
                 f"🏷 السعر السابق: {d['old']:,} ج.م (توفير {saving:,} ج.م)\n"
@@ -441,20 +404,21 @@ def main():
             )
 
             if send_telegram(msg, use_html=True):
-                state[k_link] = {"price": d["price"], "ts": now}
+                state[clean_link] = {"price": d["price"], "ts": now}
                 sent_store += 1
                 total_sent += 1
                 time.sleep(1.2)
 
         if opened:
-            summary_lines.append(f"✅ {sname}: وُجد {len(unique_deals)} عرض | أُرسل {sent_store}")
+            summary_lines.append(f"✅ {sname}: وُجد {len(unique_deals)} عرض | أُرسل جديد {sent_store}")
         else:
             summary_lines.append(f"❌ {sname}: محجوب")
 
     save_json(STATE_FILE, state)
+    commit_state()
 
     elapsed = (time.time() - t0) / 60.0
-    summary_lines.append(f"\n⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي العروض المرسلة الآن: <b>{total_sent}</b>")
+    summary_lines.append(f"\n⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي العروض الجديدة المرسلة: <b>{total_sent}</b>")
     summary_text = "\n".join(summary_lines)
     log("--- انتهت الجولة بنجاح ---\n" + summary_text)
     send_telegram(summary_text, use_html=True)
