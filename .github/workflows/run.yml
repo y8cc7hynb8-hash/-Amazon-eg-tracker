@@ -3,9 +3,8 @@ name: Run Egypt Deals Radar V14
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */2 * * *'
-
+    schedule:
+    - cron: '*/30 * * * *'
 permissions:
   contents: write
 
