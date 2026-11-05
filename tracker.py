@@ -3,7 +3,7 @@
 import os, sys, time, json, re, random, html as htmllib, subprocess, traceback, urllib.parse
 from collections import defaultdict
 
-print("⚡ بدء تشغيل رادار القنوات الاحترافي المتجدد (V17)...", flush=True)
+print("⚡ بدء تشغيل رادار الصفقات الاحترافي (V18 - أولوية أمازون مصر)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -28,17 +28,14 @@ MIN_DISCOUNT_REGULAR = int(os.environ.get("MIN_DISCOUNT", 14))    # أقل خص�
 MIN_DISCOUNT_HIGH = 8                                             # أقل خصم للسلع الغالية (> 2000 ج.م)
 MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 75))
 MIN_PRODUCT_PRICE = int(os.environ.get("MIN_PRODUCT_PRICE", 100))
-MAX_DEALS_PER_STORE = int(os.environ.get("MAX_DEALS_PER_STORE", 8))
-REALERT_HOURS = 48                                                # إعادة التنبيه بعد 48 ساعة أو لو نزل السعر 4% إضافية
+MAX_DEALS_AMAZON = 12                                             # حصة مضاعفة لأمازون مصر
+MAX_DEALS_OTHER = int(os.environ.get("MAX_DEALS_PER_STORE", 6))
+REALERT_HOURS = 48
 
 STATE_FILE = "sent_deals.json"
 HISTORY_FILE = "history.json"
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-]
+UA_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 AR_LANG = "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
 
 INSTALLMENT_WORDS = (
@@ -122,77 +119,96 @@ def is_good_deal(cur: int, old: int, has_coupon: bool = False) -> bool:
         return True
     return disc >= MIN_DISCOUNT_REGULAR
 
-def is_blocked_page(text: str, status: int) -> bool:
-    if not text or len(text) < 1200:
+def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
+    """كشف صارم يمنع قبول صفحات الكابتشا ذات الحجم الصغير (2KB - 15KB)."""
+    if not text:
         return True
-    if status in (403, 429, 503) and len(text) < 25000:
+    # صفحات المتاجر الحقيقية دائماً أكبر من 18 كيلوبايت
+    min_len = 25000 if is_amazon else 12000
+    if len(text) < min_len:
+        # استثناء فقط لو كانت استجابة JinaReader وتحتوي على منتجات وأسعار صريحة
+        if len(text) >= 3500 and ("/dp/" in text or "ج.م" in text or "جنيه" in text):
+            pass
+        else:
+            return True
+
+    if status in (403, 429, 503) and len(text) < 40000:
         return True
-    head = text[:5000].lower()
-    if "api-services-support@amazon.com" in head or "enter the characters you see below" in head:
+
+    head = text[:8000].lower()
+    captcha_markers = (
+        "validatecaptcha", "api-services-support@amazon.com", "enter the characters you see below",
+        "أدخل الأحرف التي تراها", "لست روبوت", "cf-browser-verification", "vercel security checkpoint"
+    )
+    if any(c in head for c in captcha_markers):
         return True
+
+    # في أمازون: يجب أن تحتوي الصفحة فعلياً على كروت منتجات أو روابط /dp/
+    if is_amazon and ("data-asin" not in text and "/dp/" not in text):
+        return True
+
     m = re.search(r"<title[^>]*>(.*?)</title>", head, re.I | re.S)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
     block_titles = ("just a moment", "attention required", "access denied", "403 forbidden",
-                    "security checkpoint", "robot check", "one more step", "عفواً")
+                    "security checkpoint", "robot check", "one more step", "sorry! something went wrong")
     return any(b in title for b in block_titles)
 
-# حفظ جلسات الكوكيز لكل دومين لمنع حظر أمازون ونون
-_SESSIONS = {}
-
-def smart_fetch(url: str, store_name: str) -> str:
+def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
     log(f"🔍 فحص [{store_name}]: {url}")
     parts = urllib.parse.urlsplit(url)
-    host = parts.netloc
-    home = f"{parts.scheme}://{host}/"
-    headers = {
-        "User-Agent": random.choice(USER_AGENTS),
+    home = f"{parts.scheme}://{parts.netloc}/"
+
+    # عدم تمرير User-Agent يدوي متعارض مع بصمة curl_cffi لتجنب كشف البوت في أمازون
+    base_headers = {
         "Accept-Language": AR_LANG,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Referer": home,
+        "Referer": "https://www.google.com.eg/",
         "Upgrade-Insecure-Requests": "1"
     }
+    if is_amazon:
+        base_headers["Cookie"] = "i18n-prefs=EGP; lc-acbamo=ar_AE"
 
+    # 1. المحاولة المباشرة ببصمات متصفحات متنوعة وجلسة نظيفة لكل طلب
     if HAS_CFFI:
-        for fp in ("chrome120", "safari17_0", "edge101"):
+        fps = ("safari17_0", "chrome120", "chrome116", "edge101") if is_amazon else ("chrome120", "safari17_0")
+        for fp in fps:
             try:
-                s_key = (host, fp)
-                if s_key not in _SESSIONS:
-                    sess = cffi_requests.Session(impersonate=fp)
-                    # تهيئة كوكيز الصفحة الرئيسية أولاً لمنع كابتشا أمازون
-                    try:
-                        sess.get(home, headers=headers, timeout=12)
-                    except Exception:
-                        pass
-                    _SESSIONS[s_key] = sess
-                sess = _SESSIONS[s_key]
-                r = sess.get(url, headers=headers, timeout=20)
-                if not is_blocked_page(r.text, r.status_code):
+                sess = cffi_requests.Session(impersonate=fp)
+                r = sess.get(url, headers=base_headers, timeout=20)
+                if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
                     log(f"   ✅ فتح مباشر ({fp}) - {len(r.text)//1024}KB")
                     return r.text
+                else:
+                    log(f"   ⚠ تخطي استجابة محجوبة/قصيرة ({fp}: {len(r.text)//1024}KB)")
             except Exception:
                 pass
 
+    # 2. محاولة Cloudscraper
     if scraper:
         try:
-            r = scraper.get(url, headers=headers, timeout=20)
-            if not is_blocked_page(r.text, r.status_code):
+            r = scraper.get(url, headers=base_headers, timeout=20)
+            if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
                 log(f"   ✅ فتح Cloudscraper - {len(r.text)//1024}KB")
                 return r.text
         except Exception:
             pass
 
+    # 3. البوابات الوسيطة (لتخطي حظر IP جيتهاب في أمازون و2B وغيرهما)
     enc = urllib.parse.quote(url, safe="")
     proxies = [
-        ("AllOrigins-JSON", f"https://api.allorigins.win/get?url={enc}"),
         ("CodeTabs", f"https://api.codetabs.com/v1/proxy?quest={enc}"),
-        ("JinaReader", f"https://r.jina.ai/{url}")
+        ("AllOrigins-JSON", f"https://api.allorigins.win/get?url={enc}"),
+        ("AllOrigins-Raw", f"https://api.allorigins.win/raw?url={enc}"),
+        ("JinaReader-HTML", f"https://r.jina.ai/{url}"),
+        ("JinaReader-Text", f"https://r.jina.ai/{url}")
     ]
     for pname, purl in proxies:
         try:
-            h = {"User-Agent": UA_CHROME, "Accept-Language": AR_LANG} if "UA_CHROME" in globals() else headers
-            if pname == "JinaReader":
+            h = {"User-Agent": UA_CHROME, "Accept-Language": AR_LANG}
+            if pname == "JinaReader-HTML":
                 h["X-Return-Format"] = "html"
-            r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=28) if HAS_CFFI else requests.get(purl, headers=h, timeout=28)
+                h["X-With-Links-Summary"] = "true"
+            r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=32) if HAS_CFFI else requests.get(purl, headers=h, timeout=32)
             if r.status_code != 200 or not r.text:
                 continue
             body = r.text
@@ -201,27 +217,35 @@ def smart_fetch(url: str, store_name: str) -> str:
                     body = json.loads(body).get("contents") or ""
                 except Exception:
                     continue
-            if not is_blocked_page(body, 200):
-                log(f"   🔓 تم التخطي عبر ({pname}) - {len(body)//1024}KB")
+            if not is_blocked_page(body, 200, is_amazon=is_amazon):
+                log(f"   🔓 تم التخطي بنجاح عبر ({pname}) - {len(body)//1024}KB")
                 return body
         except Exception:
             continue
 
-    log(f"   ⛔ تعذر فتح الرابط في [{store_name}]")
+    log(f"   ⛔ تعذر فتح الرابط في [{store_name}] بعد كل المحاولات")
     return ""
 
-# ================= استخراج صفقات المتاجر + الكوبونات + الهبوط التاريخي =================
+# ================= محرك استخراج أمازون مصر الثلاثي =================
 
 def extract_amazon_deals(html_text: str, history: dict) -> list:
     deals = []
+    seen_asins = set()
     soup = BeautifulSoup(html_text, "html.parser")
-    for div in soup.select('div[data-component-type="s-search-result"]'):
+
+    # الطريقة 1: كروت البحث القياسية في أمازون
+    cards = soup.select('div[data-component-type="s-search-result"], div[data-asin]')
+    for div in cards:
         asin = (div.get("data-asin") or "").strip()
-        if not asin:
+        if len(asin) != 10 or asin in seen_asins:
             continue
-        h2 = div.find("h2")
+        h2 = div.find(["h2", "h3"]) or div.find("span", class_=re.compile(r"a-text-normal", re.I))
         title = clean_title(h2.get_text(" ", strip=True)) if h2 else ""
-        if not title:
+        if len(title) < 6:
+            img = div.find("img", alt=True)
+            if img:
+                title = clean_title(img["alt"])
+        if len(title) < 6:
             continue
 
         cur = old = 0
@@ -235,15 +259,35 @@ def extract_amazon_deals(html_text: str, history: dict) -> list:
         if not cur:
             whole = div.select_one("span.a-price-whole")
             cur = parse_price(whole.get_text(" ", strip=True)) if whole else 0
+
+        # التقاط السعر من النص العام للكارت لو تم جلبه عبر JinaReader
+        card_text = div.get_text(" ", strip=True)
+        if not cur or not old:
+            clean_txt = re.sub(r"[.,]\d{1,2}(?!\d)", " ", card_text.translate(_TRANS))
+            p_matches = re.findall(r"(?:(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:ج\.?م|جنيه|EGP)|(?:ج\.?م|جنيه|EGP)\s*(\d{1,3}(?:,\d{3})+|\d{3,6}))", clean_txt, re.I)
+            nums = []
+            for m1, m2 in p_matches:
+                v = int((m1 or m2).replace(",", ""))
+                if MIN_PRODUCT_PRICE <= v <= 400000 and v not in nums:
+                    nums.append(v)
+            if len(nums) >= 2:
+                cur, old = min(nums[:2]), max(nums[:2])
+            elif len(nums) == 1 and not cur:
+                cur = nums[0]
+
         if cur < MIN_PRODUCT_PRICE:
             continue
 
-        # البحث عن الكوبونات الخضراء أو شارات التوفير في أمازون
-        card_text = div.get_text(" ", strip=True)
+        if not old:
+            m_pct = _BADGE_PCT_RE.search(card_text.translate(_TRANS))
+            if m_pct:
+                pct = int(m_pct.group(1))
+                if 10 <= pct <= MAX_REALISTIC_DISC:
+                    old = int(round(cur / (1.0 - pct / 100.0)))
+
         m_coup = _COUPON_RE.search(card_text)
         coupon_txt = m_coup.group(1).strip() if m_coup else ""
 
-        # إذا لم يضع أمازون سعراً قديماً مشطوباً، نقارنه بآخر سعر مسجل في history
         link = f"https://www.amazon.eg/dp/{asin}"
         prev_price = history.get(link, 0)
         if not old and prev_price > cur:
@@ -251,18 +295,55 @@ def extract_amazon_deals(html_text: str, history: dict) -> list:
         history[link] = cur
 
         if is_good_deal(cur, old, bool(coupon_txt)):
+            seen_asins.add(asin)
             disc = round((old - cur) / old * 100)
             deals.append({
                 "title": title, "price": cur, "old": old,
                 "discount": disc, "link": link, "coupon": coupon_txt
             })
+
+    # الطريقة 2: استخراج من الروابط المباشرة (/dp/B0...) في حال جلبت الصفحة عبر JinaReader
+    if not deals:
+        for a in soup.find_all("a", href=re.compile(r"/dp/[A-Z0-9]{10}")):
+            m_asin = re.search(r"/dp/([A-Z0-9]{10})", a["href"])
+            if not m_asin:
+                continue
+            asin = m_asin.group(1)
+            if asin in seen_asins:
+                continue
+            card = a
+            for _ in range(4):
+                if card.parent and len(card.get_text(" ", strip=True)) < 60:
+                    card = card.parent
+                else:
+                    break
+            c_txt = card.get_text(" ", strip=True)
+            title = clean_title(a.get_text(" ", strip=True) or a.get("title") or "")
+            if len(title) < 8:
+                continue
+            clean_txt = re.sub(r"[.,]\d{1,2}(?!\d)", " ", c_txt.translate(_TRANS))
+            p_matches = re.findall(r"(?:(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:ج\.?م|جنيه|EGP)|(?:ج\.?م|جنيه|EGP)\s*(\d{1,3}(?:,\d{3})+|\d{3,6}))", clean_txt, re.I)
+            nums = []
+            for m1, m2 in p_matches:
+                v = int((m1 or m2).replace(",", ""))
+                if MIN_PRODUCT_PRICE <= v <= 400000 and v not in nums:
+                    nums.append(v)
+            if len(nums) >= 2:
+                cur, old = min(nums[:2]), max(nums[:2])
+                if is_good_deal(cur, old):
+                    seen_asins.add(asin)
+                    disc = round((old - cur) / old * 100)
+                    deals.append({
+                        "title": title, "price": cur, "old": old,
+                        "discount": disc, "link": f"https://www.amazon.eg/dp/{asin}", "coupon": ""
+                    })
+
     return deals
 
 def extract_noon_deals(html_text: str, history: dict) -> list:
     deals = []
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # 1. استخراج من JSON Next.js إن وجد
     next_script = soup.find("script", id="__NEXT_DATA__")
     if next_script and next_script.string:
         try:
@@ -300,7 +381,6 @@ def extract_noon_deals(html_text: str, history: dict) -> list:
         except Exception:
             pass
 
-    # 2. استخراج من كروت الـ DOM في نون
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         if "/p/" not in href:
@@ -402,35 +482,33 @@ def extract_general_deals(html_text: str, base_domain: str, history: dict) -> li
             })
     return deals
 
-# ================= بنك الروابط المتجدد (سر القنوات الكبيرة) =================
+# ================= بنك الروابط المتجدد =================
 def build_dynamic_stores(run_seed: int) -> list:
-    """يختار صفحات وأقساماً متنوعة في كل جولة لفحص مئات المنتجات الجديدة باستمرار."""
-    amz_pages = [1, 2, 3]
+    amz_pages = [1, 2]
     p1 = amz_pages[run_seed % len(amz_pages)]
     p2 = amz_pages[(run_seed + 1) % len(amz_pages)]
 
-    # بنك شامل لأقسام أمازون مصر (باستخدام كود الخصم المباشر pct-off-with-tax)
-    amazon_pool = [
-        f"https://www.amazon.eg/s?i=electronics&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=kitchen&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=computers&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=appliances&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=beauty&rh=p_n_pct-off-with-tax%3A20-&page={p2}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=grocery&rh=p_n_pct-off-with-tax%3A15-&page={p2}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=hi&rh=p_n_pct-off-with-tax%3A15-&page={p2}&language=ar_AE",
-        f"https://www.amazon.eg/s?i=fashion&rh=p_n_pct-off-with-tax%3A25-&page={p1}&language=ar_AE",
+    # روابط أمازون مصر المؤكدة (تبدأ دائماً بالروابط المضمونة + تدوير الأقسام)
+    amazon_guaranteed = [
+        "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&language=ar_AE",
+        "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE",
+        "https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901098031&language=ar_AE",
     ]
-    random.shuffle(amazon_pool)
+    amazon_extra = [
+        f"https://www.amazon.eg/s?i=electronics&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE",
+        f"https://www.amazon.eg/s?i=kitchen&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE",
+        f"https://www.amazon.eg/s?i=appliances&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE",
+        f"https://www.amazon.eg/s?i=grocery&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE",
+        f"https://www.amazon.eg/s?i=beauty&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE",
+    ]
+    random.shuffle(amazon_extra)
 
-    # بنك شامل لأقسام نون مصر
     noon_pool = [
         f"https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc&page={p1}",
         f"https://www.noon.com/egypt-ar/electronics-and-mobiles/mobiles-and-accessories/mobiles-20905/?sort[by]=discount&sort[dir]=desc&page={p1}",
         f"https://www.noon.com/egypt-ar/home-and-kitchen/?sort[by]=discount&sort[dir]=desc&page={p1}",
         f"https://www.noon.com/egypt-ar/appliances/?sort[by]=discount&sort[dir]=desc&page={p1}",
         f"https://www.noon.com/egypt-ar/beauty-and-health/?sort[by]=discount&sort[dir]=desc&page={p2}",
-        f"https://www.noon.com/egypt-ar/electronics/?sort[by]=popularity&sort[dir]=desc&page={p2}",
         f"https://www.noon.com/egypt-ar/grocery-store/?sort[by]=discount&sort[dir]=desc&page={p1}",
     ]
     random.shuffle(noon_pool)
@@ -438,37 +516,39 @@ def build_dynamic_stores(run_seed: int) -> list:
     return [
         {
             "id": "amazon", "name": "أمازون مصر (Amazon)", "domain": "https://www.amazon.eg",
-            "type": "amazon", "urls": amazon_pool[:6]
+            "type": "amazon", "max_deals": MAX_DEALS_AMAZON,
+            "urls": amazon_guaranteed + amazon_extra[:3]
         },
         {
             "id": "noon", "name": "نون مصر (Noon)", "domain": "https://www.noon.com",
-            "type": "noon", "urls": noon_pool[:5]
+            "type": "noon", "max_deals": MAX_DEALS_OTHER,
+            "urls": noon_pool[:4]
         },
         {
             "id": "2b", "name": "2B Egypt", "domain": "https://2b.com.eg",
-            "type": "general", "urls": [
+            "type": "general", "max_deals": MAX_DEALS_OTHER,
+            "urls": [
                 f"https://2b.com.eg/ar/deals.html?p={p1}",
                 f"https://2b.com.eg/ar/computers.html?p={p1}",
                 f"https://2b.com.eg/ar/mobiles-tablets.html?p={p1}",
-                f"https://2b.com.eg/ar/home-appliances.html?p={p1}",
-                f"https://2b.com.eg/ar/gaming.html?p={p1}"
+                f"https://2b.com.eg/ar/home-appliances.html?p={p1}"
             ]
         },
         {
             "id": "raneen", "name": "رنين (Raneen)", "domain": "https://www.raneen.com",
-            "type": "general", "urls": [
+            "type": "general", "max_deals": MAX_DEALS_OTHER,
+            "urls": [
                 f"https://www.raneen.com/ar/deals?p={p1}",
                 "https://www.raneen.com/ar/deals/appliances-electronics-offers",
-                "https://www.raneen.com/ar/mobiles-tablets",
-                "https://www.raneen.com/ar/home-appliances"
+                "https://www.raneen.com/ar/mobiles-tablets"
             ]
         },
         {
             "id": "dream2000", "name": "دريم 2000 (Dream 2000)", "domain": "https://dream2000.com",
-            "type": "general", "urls": [
+            "type": "general", "max_deals": MAX_DEALS_OTHER,
+            "urls": [
                 f"https://dream2000.com/mobiles.html?p={p1}",
-                f"https://dream2000.com/home-appliances.html?p={p1}",
-                f"https://dream2000.com/mobile-accessories.html?p={p1}"
+                f"https://dream2000.com/home-appliances.html?p={p1}"
             ]
         }
     ]
@@ -507,37 +587,39 @@ def commit_state():
 def main():
     t0 = time.time()
     now = int(t0)
-    run_seed = int(now // 1800)  # يتغير كل نصف ساعة لتدوير الصفحات والأقسام تلقائياً
-    log(f"🚀 بدأ الرادار المتجدد (V17) - دورة التدوير #{run_seed % 10}...")
+    run_seed = int(now // 1800)
+    log(f"🚀 بدأ الرادار المتجدد (V18) - دورة التدوير #{run_seed % 10}...")
 
     state = load_json(STATE_FILE)
     history = load_json(HISTORY_FILE)
 
-    # تنظيف الروابط القديمة التي مر عليها أكثر من 48 ساعة من الذاكرة لإبقائها متجددة
     state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_HOURS * 3600}
 
     stores = build_dynamic_stores(run_seed)
-    summary_lines = ["📊 <b>ملخص جولة الصفقات المتجددة (V17)</b>", ""]
+    summary_lines = ["📊 <b>ملخص جولة الصفقات المتجددة (V18)</b>", ""]
     total_sent = 0
 
     for st in stores:
         sname = st["name"]
         stype = st["type"]
+        max_store_deals = st.get("max_deals", MAX_DEALS_OTHER)
+        is_amz = (stype == "amazon")
         found_deals = []
         opened = False
 
         for u in st["urls"]:
-            html_txt = smart_fetch(u, sname)
+            html_txt = smart_fetch(u, sname, is_amazon=is_amz)
             if html_txt:
                 opened = True
-                if stype == "amazon":
+                if is_amz:
                     extracted = extract_amazon_deals(html_txt, history)
                 elif stype == "noon":
                     extracted = extract_noon_deals(html_txt, history)
                 else:
                     extracted = extract_general_deals(html_txt, st["domain"], history)
+                log(f"   📦 استُخرج {len(extracted)} عرض من الرابط")
                 found_deals.extend(extracted)
-            time.sleep(random.uniform(0.7, 1.4))
+            time.sleep(random.uniform(1.0, 2.0))
 
         unique_deals = {}
         for d in found_deals:
@@ -549,13 +631,12 @@ def main():
         sent_store = 0
 
         for d in ordered:
-            if sent_store >= MAX_DEALS_PER_STORE:
+            if sent_store >= max_store_deals:
                 break
 
             clean_link = d["link"].split("?")[0].rstrip("/").lower()
             prev = state.get(clean_link)
 
-            # يُرسل إذا لم يُرسل في آخر 48 ساعة، أو إذا نزل سعره بنسبة 4% إضافية عن آخر مرة أُرسل فيها
             if prev:
                 prev_price = prev.get("price", d["price"])
                 if d["price"] >= prev_price * 0.96:
@@ -583,7 +664,6 @@ def main():
         else:
             summary_lines.append(f"❌ {sname}: تعذر الفتح في هذه الجولة")
 
-    # الاحتفاظ بآخر 8000 سعر في الذاكرة فقط لسرعة الأداء
     if len(history) > 8000:
         history = dict(list(history.items())[-8000:])
 
