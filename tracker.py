@@ -3,7 +3,7 @@
 import os, sys, time, json, re, random, html as htmllib, subprocess, traceback, urllib.parse
 from collections import defaultdict
 
-print("⚡ بدء تشغيل رادار الصفقات الاحترافي (V18 - أولوية أمازون مصر)...", flush=True)
+print("⚡ بدء تشغيل رادار الصفقات الاحترافي (V18.1 - تشغيل تلقائي منتظم)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -120,13 +120,10 @@ def is_good_deal(cur: int, old: int, has_coupon: bool = False) -> bool:
     return disc >= MIN_DISCOUNT_REGULAR
 
 def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
-    """كشف صارم يمنع قبول صفحات الكابتشا ذات الحجم الصغير (2KB - 15KB)."""
     if not text:
         return True
-    # صفحات المتاجر الحقيقية دائماً أكبر من 18 كيلوبايت
     min_len = 25000 if is_amazon else 12000
     if len(text) < min_len:
-        # استثناء فقط لو كانت استجابة JinaReader وتحتوي على منتجات وأسعار صريحة
         if len(text) >= 3500 and ("/dp/" in text or "ج.م" in text or "جنيه" in text):
             pass
         else:
@@ -143,7 +140,6 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
     if any(c in head for c in captcha_markers):
         return True
 
-    # في أمازون: يجب أن تحتوي الصفحة فعلياً على كروت منتجات أو روابط /dp/
     if is_amazon and ("data-asin" not in text and "/dp/" not in text):
         return True
 
@@ -155,10 +151,6 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
 
 def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
     log(f"🔍 فحص [{store_name}]: {url}")
-    parts = urllib.parse.urlsplit(url)
-    home = f"{parts.scheme}://{parts.netloc}/"
-
-    # عدم تمرير User-Agent يدوي متعارض مع بصمة curl_cffi لتجنب كشف البوت في أمازون
     base_headers = {
         "Accept-Language": AR_LANG,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -168,7 +160,6 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
     if is_amazon:
         base_headers["Cookie"] = "i18n-prefs=EGP; lc-acbamo=ar_AE"
 
-    # 1. المحاولة المباشرة ببصمات متصفحات متنوعة وجلسة نظيفة لكل طلب
     if HAS_CFFI:
         fps = ("safari17_0", "chrome120", "chrome116", "edge101") if is_amazon else ("chrome120", "safari17_0")
         for fp in fps:
@@ -183,7 +174,6 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
             except Exception:
                 pass
 
-    # 2. محاولة Cloudscraper
     if scraper:
         try:
             r = scraper.get(url, headers=base_headers, timeout=20)
@@ -193,7 +183,6 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
         except Exception:
             pass
 
-    # 3. البوابات الوسيطة (لتخطي حظر IP جيتهاب في أمازون و2B وغيرهما)
     enc = urllib.parse.quote(url, safe="")
     proxies = [
         ("CodeTabs", f"https://api.codetabs.com/v1/proxy?quest={enc}"),
@@ -226,14 +215,13 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
     log(f"   ⛔ تعذر فتح الرابط في [{store_name}] بعد كل المحاولات")
     return ""
 
-# ================= محرك استخراج أمازون مصر الثلاثي =================
+# ================= محركات الاستخراج =================
 
 def extract_amazon_deals(html_text: str, history: dict) -> list:
     deals = []
     seen_asins = set()
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # الطريقة 1: كروت البحث القياسية في أمازون
     cards = soup.select('div[data-component-type="s-search-result"], div[data-asin]')
     for div in cards:
         asin = (div.get("data-asin") or "").strip()
@@ -260,7 +248,6 @@ def extract_amazon_deals(html_text: str, history: dict) -> list:
             whole = div.select_one("span.a-price-whole")
             cur = parse_price(whole.get_text(" ", strip=True)) if whole else 0
 
-        # التقاط السعر من النص العام للكارت لو تم جلبه عبر JinaReader
         card_text = div.get_text(" ", strip=True)
         if not cur or not old:
             clean_txt = re.sub(r"[.,]\d{1,2}(?!\d)", " ", card_text.translate(_TRANS))
@@ -302,7 +289,6 @@ def extract_amazon_deals(html_text: str, history: dict) -> list:
                 "discount": disc, "link": link, "coupon": coupon_txt
             })
 
-    # الطريقة 2: استخراج من الروابط المباشرة (/dp/B0...) في حال جلبت الصفحة عبر JinaReader
     if not deals:
         for a in soup.find_all("a", href=re.compile(r"/dp/[A-Z0-9]{10}")):
             m_asin = re.search(r"/dp/([A-Z0-9]{10})", a["href"])
@@ -488,7 +474,6 @@ def build_dynamic_stores(run_seed: int) -> list:
     p1 = amz_pages[run_seed % len(amz_pages)]
     p2 = amz_pages[(run_seed + 1) % len(amz_pages)]
 
-    # روابط أمازون مصر المؤكدة (تبدأ دائماً بالروابط المضمونة + تدوير الأقسام)
     amazon_guaranteed = [
         "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&language=ar_AE",
         "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE",
@@ -577,7 +562,7 @@ def commit_state():
             if os.path.exists(f):
                 subprocess.run(["git", "add", f], check=False)
         if subprocess.run(["git", "diff", "--cached", "--quiet"], check=False).returncode != 0:
-            subprocess.run(["git", "commit", "-m", "chore: update radar memory [skip ci]"], check=False)
+            subprocess.run(["git", "commit", "-m", "chore: update radar memory"], check=False)
             subprocess.run(["git", "pull", "--rebase", "origin", "main"], check=False)
             subprocess.run(["git", "push"], check=False)
             log("💾 تم حفظ الذاكرة في GitHub بنجاح.")
@@ -588,7 +573,7 @@ def main():
     t0 = time.time()
     now = int(t0)
     run_seed = int(now // 1800)
-    log(f"🚀 بدأ الرادار المتجدد (V18) - دورة التدوير #{run_seed % 10}...")
+    log(f"🚀 بدأ الرادار المتجدد (V18.1) - دورة التدوير #{run_seed % 10}...")
 
     state = load_json(STATE_FILE)
     history = load_json(HISTORY_FILE)
@@ -596,7 +581,7 @@ def main():
     state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_HOURS * 3600}
 
     stores = build_dynamic_stores(run_seed)
-    summary_lines = ["📊 <b>ملخص جولة الصفقات المتجددة (V18)</b>", ""]
+    summary_lines = ["📊 <b>ملخص جولة الصفقات المتجددة (V18.1)</b>", ""]
     total_sent = 0
 
     for st in stores:
@@ -619,69 +604,4 @@ def main():
                     extracted = extract_general_deals(html_txt, st["domain"], history)
                 log(f"   📦 استُخرج {len(extracted)} عرض من الرابط")
                 found_deals.extend(extracted)
-            time.sleep(random.uniform(1.0, 2.0))
-
-        unique_deals = {}
-        for d in found_deals:
-            k = norm_title(d["title"])
-            if k and (k not in unique_deals or d["discount"] > unique_deals[k]["discount"]):
-                unique_deals[k] = d
-
-        ordered = sorted(unique_deals.values(), key=lambda x: (x["discount"], x["old"] - x["price"]), reverse=True)
-        sent_store = 0
-
-        for d in ordered:
-            if sent_store >= max_store_deals:
-                break
-
-            clean_link = d["link"].split("?")[0].rstrip("/").lower()
-            prev = state.get(clean_link)
-
-            if prev:
-                prev_price = prev.get("price", d["price"])
-                if d["price"] >= prev_price * 0.96:
-                    continue
-
-            saving = d["old"] - d["price"]
-            coupon_line = f"🎟 <b>كوبون إضافي: {htmllib.escape(d['coupon'])}</b>\n" if d.get("coupon") else ""
-            msg = (
-                f"🔥 <b>لقطة جديدة من {htmllib.escape(sname)}</b> (خصم {d['discount']}%)\n\n"
-                f"📦 {htmllib.escape(d['title'])}\n"
-                f"💰 السعر الآن: <b>{d['price']:,} ج.م</b>\n"
-                f"🏷 السعر السابق: {d['old']:,} ج.م (توفير {saving:,} ج.م)\n"
-                f"{coupon_line}"
-                f"🔗 {d['link']}"
-            )
-
-            if send_telegram(msg, use_html=True):
-                state[clean_link] = {"price": d["price"], "ts": now}
-                sent_store += 1
-                total_sent += 1
-                time.sleep(1.1)
-
-        if opened:
-            summary_lines.append(f"✅ {sname}: فُحص {len(unique_deals)} عرض | أُرسل جديد {sent_store}")
-        else:
-            summary_lines.append(f"❌ {sname}: تعذر الفتح في هذه الجولة")
-
-    if len(history) > 8000:
-        history = dict(list(history.items())[-8000:])
-
-    save_json(STATE_FILE, state)
-    save_json(HISTORY_FILE, history)
-    commit_state()
-
-    elapsed = (time.time() - t0) / 60.0
-    summary_lines.append(f"\n⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي الصفقات الجديدة المرسلة: <b>{total_sent}</b>")
-    summary_text = "\n".join(summary_lines)
-    log("--- انتهت الجولة بنجاح ---\n" + summary_text)
-    send_telegram(summary_text, use_html=True)
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        tb = traceback.format_exc()
-        log(tb)
-        send_telegram("❌ خطأ في تشغيل الرادار:\n" + tb[-1500:])
-        sys.exit(1)
+            time.sleep(random.uniform(1
