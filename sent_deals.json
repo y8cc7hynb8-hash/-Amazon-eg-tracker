@@ -2612,8 +2612,8 @@
     "ts": 1793785894
   },
   "https://2b.com.eg/ar/acer-aspire-lite-al15-53p-57eq-laptop-intelr-coretm-5-120u-16gb-512gb-ssd-intel-graphics-15-6-fhd-ips-60hz-light-silver.html": {
-    "price": 33099,
-    "ts": 1793796245
+    "price": 30599,
+    "ts": 1793868504
   },
   "https://www.amazon.eg/dp/b0btx9yfgz": {
     "price": 157,
@@ -2642,5 +2642,9 @@
   "https://www.amazon.eg/dp/b07mb9dht8": {
     "price": 168,
     "ts": 1793861703
+  },
+  "https://2b.com.eg/ar/hp-omnibook-5-flip-14-km0009ne-laptop-intelr-coretm-ultra-7-355-16gb-512gb-ssd-intelr-graphics-14-touch-2k-glacier-silver.html": {
+    "price": 69899,
+    "ts": 1793868504
   }
 }
