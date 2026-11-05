@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, sys, time, json, re, random, html as htmllib, subprocess, traceback, urllib.parse
-from collections import defaultdict
 
-print("⚡ بدء تشغيل رادار الصفقات الاحترافي (V18.1 - تشغيل تلقائي منتظم)...", flush=True)
+print("⚡ بدء تشغيل رادار الصفقات الاحترافي (V18.2)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -20,28 +19,22 @@ try:
 except ImportError:
     scraper = None
 
-# ================= الإعدادات =================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-MIN_DISCOUNT_REGULAR = int(os.environ.get("MIN_DISCOUNT", 14))    # أقل خصم للسلع العادية
-MIN_DISCOUNT_HIGH = 8                                             # أقل خصم للسلع الغالية (> 2000 ج.م)
+MIN_DISCOUNT_REGULAR = int(os.environ.get("MIN_DISCOUNT", 14))
+MIN_DISCOUNT_HIGH = 8
 MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 75))
 MIN_PRODUCT_PRICE = int(os.environ.get("MIN_PRODUCT_PRICE", 100))
-MAX_DEALS_AMAZON = 12                                             # حصة مضاعفة لأمازون مصر
+MAX_DEALS_AMAZON = 12
 MAX_DEALS_OTHER = int(os.environ.get("MAX_DEALS_PER_STORE", 6))
 REALERT_HOURS = 48
 
 STATE_FILE = "sent_deals.json"
 HISTORY_FILE = "history.json"
-
 UA_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 AR_LANG = "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
-
-INSTALLMENT_WORDS = (
-    "قسط", "شهري", "شهريا", "شهرياً", "ميني كاش", "minicash", "/شهر", "month",
-    "تقسيط", "أقساط", "installment", "/mo", "فائدة", "بدون فوائد", "دفعة"
-)
+INSTALLMENT_WORDS = ("قسط", "شهري", "شهريا", "شهرياً", "ميني كاش", "minicash", "/شهر", "month", "تقسيط", "أقساط", "installment", "/mo", "فائدة", "بدون فوائد", "دفعة")
 
 _AR = "".join(chr(0x0660 + i) for i in range(10)) + "".join(chr(0x06F0 + i) for i in range(10)) + "\u066b\u066c\u060c"
 _TRANS = str.maketrans(_AR, "0123456789" * 2 + ".,,")
@@ -64,8 +57,7 @@ def send_telegram(message: str, use_html: bool = False) -> bool:
             if r.status_code == 200:
                 return True
             if r.status_code == 429:
-                wait = int(r.json().get("parameters", {}).get("retry_after", 4))
-                time.sleep(wait + 1)
+                time.sleep(int(r.json().get("parameters", {}).get("retry_after", 4)) + 1)
                 continue
             if r.status_code == 400 and use_html:
                 payload.pop("parse_mode", None)
@@ -88,34 +80,30 @@ def parse_price(value) -> int:
     text = text.translate(_TRANS).replace("\u00a0", " ")
     text = re.sub(r"[.,]\d{1,2}(?!\d)", " ", text)
     text = re.sub(r"ج\s*\.?\s*م\s*\.?", " ", text)
-    candidates = []
     for m in re.findall(r"\d{1,3}(?:,\d{3})+|\d+", text):
         v = int(m.replace(",", ""))
         if 50 <= v <= 500000:
-            candidates.append(v)
-    return candidates[0] if candidates else 0
+            return v
+    return 0
 
 def clean_title(t: str) -> str:
     t = re.sub(r"\s+", " ", t or "").strip()
-    t = re.sub(r"^[-\u2212\u2013]?\s*\d{1,2}\s?%\s*", "", t)
-    return t[:180]
+    return re.sub(r"^[-\u2212\u2013]?\s*\d{1,2}\s?%\s*", "", t)[:180]
 
 def norm_title(title: str) -> str:
     clean = re.sub(r"[^\w\s]", " ", (title or "").lower())
     stop = {"عرض", "خصم", "جديد", "أصلي", "ضمان", "مصر", "سنة", "new", "egypt", "with", "and"}
-    words = [w for w in clean.split() if len(w) > 1 and w not in stop]
-    return " ".join(words[:8])
+    return " ".join([w for w in clean.split() if len(w) > 1 and w not in stop][:8])
 
 def is_good_deal(cur: int, old: int, has_coupon: bool = False) -> bool:
     if cur < MIN_PRODUCT_PRICE or old <= cur:
         return False
     disc = round((old - cur) / old * 100)
-    saving = old - cur
     if disc > MAX_REALISTIC_DISC:
         return False
     if has_coupon and disc >= 8:
         return True
-    if cur >= 2000 and (disc >= MIN_DISCOUNT_HIGH or saving >= 250):
+    if cur >= 2000 and (disc >= MIN_DISCOUNT_HIGH or (old - cur) >= 250):
         return True
     return disc >= MIN_DISCOUNT_REGULAR
 
@@ -123,31 +111,18 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
     if not text:
         return True
     min_len = 25000 if is_amazon else 12000
-    if len(text) < min_len:
-        if len(text) >= 3500 and ("/dp/" in text or "ج.م" in text or "جنيه" in text):
-            pass
-        else:
-            return True
-
+    if len(text) < min_len and not (len(text) >= 3500 and ("/dp/" in text or "ج.م" in text or "جنيه" in text)):
+        return True
     if status in (403, 429, 503) and len(text) < 40000:
         return True
-
     head = text[:8000].lower()
-    captcha_markers = (
-        "validatecaptcha", "api-services-support@amazon.com", "enter the characters you see below",
-        "أدخل الأحرف التي تراها", "لست روبوت", "cf-browser-verification", "vercel security checkpoint"
-    )
-    if any(c in head for c in captcha_markers):
+    if any(c in head for c in ("validatecaptcha", "api-services-support@amazon.com", "enter the characters you see below", "cf-browser-verification", "vercel security checkpoint")):
         return True
-
     if is_amazon and ("data-asin" not in text and "/dp/" not in text):
         return True
-
     m = re.search(r"<title[^>]*>(.*?)</title>", head, re.I | re.S)
     title = re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
-    block_titles = ("just a moment", "attention required", "access denied", "403 forbidden",
-                    "security checkpoint", "robot check", "one more step", "sorry! something went wrong")
-    return any(b in title for b in block_titles)
+    return any(b in title for b in ("just a moment", "attention required", "access denied", "403 forbidden", "security checkpoint", "robot check", "sorry! something went wrong"))
 
 def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
     log(f"🔍 فحص [{store_name}]: {url}")
@@ -169,8 +144,6 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
                 if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
                     log(f"   ✅ فتح مباشر ({fp}) - {len(r.text)//1024}KB")
                     return r.text
-                else:
-                    log(f"   ⚠ تخطي استجابة محجوبة/قصيرة ({fp}: {len(r.text)//1024}KB)")
             except Exception:
                 pass
 
@@ -200,60 +173,43 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
             r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=32) if HAS_CFFI else requests.get(purl, headers=h, timeout=32)
             if r.status_code != 200 or not r.text:
                 continue
-            body = r.text
-            if pname == "AllOrigins-JSON":
-                try:
-                    body = json.loads(body).get("contents") or ""
-                except Exception:
-                    continue
+            body = json.loads(r.text).get("contents") or "" if pname == "AllOrigins-JSON" else r.text
             if not is_blocked_page(body, 200, is_amazon=is_amazon):
-                log(f"   🔓 تم التخطي بنجاح عبر ({pname}) - {len(body)//1024}KB")
+                log(f"   🔓 تم التخطي عبر ({pname}) - {len(body)//1024}KB")
                 return body
         except Exception:
             continue
 
-    log(f"   ⛔ تعذر فتح الرابط في [{store_name}] بعد كل المحاولات")
+    log(f"   ⛔ تعذر فتح الرابط في [{store_name}]")
     return ""
 
-# ================= محركات الاستخراج =================
-
 def extract_amazon_deals(html_text: str, history: dict) -> list:
-    deals = []
-    seen_asins = set()
+    deals, seen_asins = [], set()
     soup = BeautifulSoup(html_text, "html.parser")
-
-    cards = soup.select('div[data-component-type="s-search-result"], div[data-asin]')
-    for div in cards:
+    for div in soup.select('div[data-component-type="s-search-result"], div[data-asin]'):
         asin = (div.get("data-asin") or "").strip()
         if len(asin) != 10 or asin in seen_asins:
             continue
         h2 = div.find(["h2", "h3"]) or div.find("span", class_=re.compile(r"a-text-normal", re.I))
         title = clean_title(h2.get_text(" ", strip=True)) if h2 else ""
-        if len(title) < 6:
-            img = div.find("img", alt=True)
-            if img:
-                title = clean_title(img["alt"])
+        if len(title) < 6 and div.find("img", alt=True):
+            title = clean_title(div.find("img", alt=True)["alt"])
         if len(title) < 6:
             continue
-
         cur = old = 0
         for p in div.select("span.a-price"):
-            off = p.select_one("span.a-offscreen")
-            val = parse_price((off or p).get_text(" ", strip=True))
+            val = parse_price((p.select_one("span.a-offscreen") or p).get_text(" ", strip=True))
             if p.get("data-a-strike") == "true" or "a-text-price" in (p.get("class") or []):
                 old = old or val
             else:
                 cur = cur or val
-        if not cur:
-            whole = div.select_one("span.a-price-whole")
-            cur = parse_price(whole.get_text(" ", strip=True)) if whole else 0
-
+        if not cur and div.select_one("span.a-price-whole"):
+            cur = parse_price(div.select_one("span.a-price-whole").get_text(" ", strip=True))
         card_text = div.get_text(" ", strip=True)
         if not cur or not old:
             clean_txt = re.sub(r"[.,]\d{1,2}(?!\d)", " ", card_text.translate(_TRANS))
-            p_matches = re.findall(r"(?:(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:ج\.?م|جنيه|EGP)|(?:ج\.?م|جنيه|EGP)\s*(\d{1,3}(?:,\d{3})+|\d{3,6}))", clean_txt, re.I)
             nums = []
-            for m1, m2 in p_matches:
+            for m1, m2 in re.findall(r"(?:(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:ج\.?م|جنيه|EGP)|(?:ج\.?م|جنيه|EGP)\s*(\d{1,3}(?:,\d{3})+|\d{3,6}))", clean_txt, re.I):
                 v = int((m1 or m2).replace(",", ""))
                 if MIN_PRODUCT_PRICE <= v <= 400000 and v not in nums:
                     nums.append(v)
@@ -261,102 +217,46 @@ def extract_amazon_deals(html_text: str, history: dict) -> list:
                 cur, old = min(nums[:2]), max(nums[:2])
             elif len(nums) == 1 and not cur:
                 cur = nums[0]
-
         if cur < MIN_PRODUCT_PRICE:
             continue
-
         if not old:
             m_pct = _BADGE_PCT_RE.search(card_text.translate(_TRANS))
-            if m_pct:
-                pct = int(m_pct.group(1))
-                if 10 <= pct <= MAX_REALISTIC_DISC:
-                    old = int(round(cur / (1.0 - pct / 100.0)))
-
+            if m_pct and 10 <= int(m_pct.group(1)) <= MAX_REALISTIC_DISC:
+                old = int(round(cur / (1.0 - int(m_pct.group(1)) / 100.0)))
         m_coup = _COUPON_RE.search(card_text)
         coupon_txt = m_coup.group(1).strip() if m_coup else ""
-
         link = f"https://www.amazon.eg/dp/{asin}"
-        prev_price = history.get(link, 0)
-        if not old and prev_price > cur:
-            old = prev_price
+        if not old and history.get(link, 0) > cur:
+            old = history[link]
         history[link] = cur
-
         if is_good_deal(cur, old, bool(coupon_txt)):
             seen_asins.add(asin)
-            disc = round((old - cur) / old * 100)
-            deals.append({
-                "title": title, "price": cur, "old": old,
-                "discount": disc, "link": link, "coupon": coupon_txt
-            })
-
-    if not deals:
-        for a in soup.find_all("a", href=re.compile(r"/dp/[A-Z0-9]{10}")):
-            m_asin = re.search(r"/dp/([A-Z0-9]{10})", a["href"])
-            if not m_asin:
-                continue
-            asin = m_asin.group(1)
-            if asin in seen_asins:
-                continue
-            card = a
-            for _ in range(4):
-                if card.parent and len(card.get_text(" ", strip=True)) < 60:
-                    card = card.parent
-                else:
-                    break
-            c_txt = card.get_text(" ", strip=True)
-            title = clean_title(a.get_text(" ", strip=True) or a.get("title") or "")
-            if len(title) < 8:
-                continue
-            clean_txt = re.sub(r"[.,]\d{1,2}(?!\d)", " ", c_txt.translate(_TRANS))
-            p_matches = re.findall(r"(?:(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:ج\.?م|جنيه|EGP)|(?:ج\.?م|جنيه|EGP)\s*(\d{1,3}(?:,\d{3})+|\d{3,6}))", clean_txt, re.I)
-            nums = []
-            for m1, m2 in p_matches:
-                v = int((m1 or m2).replace(",", ""))
-                if MIN_PRODUCT_PRICE <= v <= 400000 and v not in nums:
-                    nums.append(v)
-            if len(nums) >= 2:
-                cur, old = min(nums[:2]), max(nums[:2])
-                if is_good_deal(cur, old):
-                    seen_asins.add(asin)
-                    disc = round((old - cur) / old * 100)
-                    deals.append({
-                        "title": title, "price": cur, "old": old,
-                        "discount": disc, "link": f"https://www.amazon.eg/dp/{asin}", "coupon": ""
-                    })
-
+            deals.append({"title": title, "price": cur, "old": old, "discount": round((old - cur) / old * 100), "link": link, "coupon": coupon_txt})
     return deals
 
 def extract_noon_deals(html_text: str, history: dict) -> list:
     deals = []
     soup = BeautifulSoup(html_text, "html.parser")
-
     next_script = soup.find("script", id="__NEXT_DATA__")
     if next_script and next_script.string:
         try:
-            data = json.loads(next_script.string)
-            stack = [data]
+            stack = [json.loads(next_script.string)]
             while stack:
                 node = stack.pop()
                 if isinstance(node, dict):
                     sku = node.get("sku") or node.get("catalog_sku")
                     name = node.get("name") or node.get("title")
                     if sku and isinstance(name, str) and len(name) >= 6:
-                        p_sale = parse_price(node.get("sale_price"))
-                        p_reg = parse_price(node.get("price"))
+                        p_sale, p_reg = parse_price(node.get("sale_price")), parse_price(node.get("price"))
                         cur = p_sale if p_sale > 0 else p_reg
                         old = p_reg if (p_sale > 0 and p_reg > p_sale) else 0
-                        slug = node.get("url") or "deal"
-                        link = f"https://www.noon.com/egypt-ar/{str(slug).strip('/')}/{sku}/p/"
+                        link = f"https://www.noon.com/egypt-ar/{str(node.get('url') or 'deal').strip('/')}/{sku}/p/"
                         if not old and history.get(link, 0) > cur:
                             old = history[link]
                         if cur >= MIN_PRODUCT_PRICE:
                             history[link] = cur
                         if is_good_deal(cur, old):
-                            disc = round((old - cur) / old * 100)
-                            deals.append({
-                                "title": clean_title(name), "price": cur, "old": old,
-                                "discount": disc, "link": link, "coupon": ""
-                            })
+                            deals.append({"title": clean_title(name), "price": cur, "old": old, "discount": round((old - cur) / old * 100), "link": link, "coupon": ""})
                     for v in node.values():
                         if isinstance(v, (dict, list)):
                             stack.append(v)
@@ -375,105 +275,66 @@ def extract_noon_deals(html_text: str, history: dict) -> list:
         card_text = a.get_text(" ", strip=True)
         if any(w in card_text.lower() for w in INSTALLMENT_WORDS):
             continue
-
-        title_el = a.find(attrs={"data-qa": re.compile(r"product-name|title", re.I)}) or a.find(["h2", "h3"])
-        title = clean_title(title_el.get_text(" ", strip=True) if title_el else a.get("title") or "")
-        if len(title) < 6:
-            img = a.find("img", alt=True)
-            if img and len(img["alt"].strip()) >= 6:
-                title = clean_title(img["alt"])
+        t_el = a.find(attrs={"data-qa": re.compile(r"product-name|title", re.I)}) or a.find(["h2", "h3"])
+        title = clean_title(t_el.get_text(" ", strip=True) if t_el else a.get("title") or "")
+        if len(title) < 6 and a.find("img", alt=True):
+            title = clean_title(a.find("img", alt=True)["alt"])
         if len(title) < 6:
             continue
-
-        cur = old = 0
         p_now = a.find(attrs={"data-qa": re.compile(r"selling-price|price-now", re.I)}) or a.find(class_=re.compile(r"priceNow|amount", re.I))
         p_was = a.find(attrs={"data-qa": re.compile(r"old-price|price-was", re.I)}) or a.find(class_=re.compile(r"priceWas|oldPrice|strike", re.I))
-
-        if p_now:
-            cur = parse_price(p_now.get_text())
-        if p_was:
-            old = parse_price(p_was.get_text())
-
+        cur = parse_price(p_now.get_text()) if p_now else 0
+        old = parse_price(p_was.get_text()) if p_was else 0
         if cur >= MIN_PRODUCT_PRICE and not old:
             m_pct = _BADGE_PCT_RE.search(card_text.translate(_TRANS))
-            if m_pct:
-                pct = int(m_pct.group(1))
-                if 10 <= pct <= MAX_REALISTIC_DISC:
-                    old = int(round(cur / (1.0 - pct / 100.0)))
-
+            if m_pct and 10 <= int(m_pct.group(1)) <= MAX_REALISTIC_DISC:
+                old = int(round(cur / (1.0 - int(m_pct.group(1)) / 100.0)))
         if not old and cur >= MIN_PRODUCT_PRICE and history.get(link, 0) > cur:
             old = history[link]
         if cur >= MIN_PRODUCT_PRICE:
             history[link] = cur
-
         if is_good_deal(cur, old):
-            disc = round((old - cur) / old * 100)
-            deals.append({
-                "title": title, "price": cur, "old": old,
-                "discount": disc, "link": link, "coupon": ""
-            })
+            deals.append({"title": title, "price": cur, "old": old, "discount": round((old - cur) / old * 100), "link": link, "coupon": ""})
     return deals
 
 def extract_general_deals(html_text: str, base_domain: str, history: dict) -> list:
     deals = []
     soup = BeautifulSoup(html_text, "html.parser")
-    cards = soup.find_all(["li", "div", "article"], class_=re.compile(r"product-item|productCard|prd|product-layout|plp-product-card|product-card|grid-item", re.I))
-    for card in cards:
+    for card in soup.find_all(["li", "div", "article"], class_=re.compile(r"product-item|productCard|prd|product-layout|plp-product-card|product-card|grid-item", re.I)):
         for inst in card.find_all(class_=re.compile(r"installment|minicash|monthly|tabby|tamara", re.I)):
             inst.decompose()
-
         a = card.find("a", href=True)
-        if not a:
+        if not a or not a["href"].strip() or a["href"].startswith("#") or "javascript:" in a["href"]:
             continue
-        href = a["href"].strip()
-        if not href or href.startswith("#") or "javascript:" in href:
-            continue
-        link = urllib.parse.urljoin(base_domain, href).split("?")[0]
-
+        link = urllib.parse.urljoin(base_domain, a["href"].strip()).split("?")[0]
         t_el = card.find(["h2", "h3", "h4", "strong"], class_=re.compile(r"name|title|link", re.I)) or a
         title = clean_title(t_el.get_text(" ", strip=True) or a.get("title") or "")
         if len(title) < 6 or any(w in title.lower() for w in INSTALLMENT_WORDS):
             continue
-
         sp_el = card.find(attrs={"data-price-type": "finalPrice"}) or card.find(class_=re.compile(r"special-price|finalPrice|price-new|prc|current", re.I)) or card.find("ins")
         old_el = card.find(attrs={"data-price-type": "oldPrice"}) or card.find(class_=re.compile(r"old-price|oldPrice|price-old|old|was|regular", re.I)) or card.find(["del", "s", "strike"])
-
         cur = parse_price(sp_el.get_text()) if sp_el else 0
         old = parse_price(old_el.get_text()) if old_el else 0
-
         if not cur:
             for pt in card.find_all(class_=re.compile(r"price", re.I)):
                 v = parse_price(pt.get_text())
                 if v >= MIN_PRODUCT_PRICE:
                     cur = v
                     break
-
         if cur >= MIN_PRODUCT_PRICE and not old:
             m_pct = _BADGE_PCT_RE.search(card.get_text(" ", strip=True).translate(_TRANS))
-            if m_pct:
-                pct = int(m_pct.group(1))
-                if 10 <= pct <= MAX_REALISTIC_DISC:
-                    old = int(round(cur / (1.0 - pct / 100.0)))
-
+            if m_pct and 10 <= int(m_pct.group(1)) <= MAX_REALISTIC_DISC:
+                old = int(round(cur / (1.0 - int(m_pct.group(1)) / 100.0)))
         if not old and cur >= MIN_PRODUCT_PRICE and history.get(link, 0) > cur:
             old = history[link]
         if cur >= MIN_PRODUCT_PRICE:
             history[link] = cur
-
         if is_good_deal(cur, old):
-            disc = round((old - cur) / old * 100)
-            deals.append({
-                "title": title, "price": cur, "old": old,
-                "discount": disc, "link": link, "coupon": ""
-            })
+            deals.append({"title": title, "price": cur, "old": old, "discount": round((old - cur) / old * 100), "link": link, "coupon": ""})
     return deals
 
-# ================= بنك الروابط المتجدد =================
 def build_dynamic_stores(run_seed: int) -> list:
-    amz_pages = [1, 2]
-    p1 = amz_pages[run_seed % len(amz_pages)]
-    p2 = amz_pages[(run_seed + 1) % len(amz_pages)]
-
+    p1, p2 = [1, 2][run_seed % 2], [1, 2][(run_seed + 1) % 2]
     amazon_guaranteed = [
         "https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&language=ar_AE",
         "https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&language=ar_AE",
@@ -487,7 +348,6 @@ def build_dynamic_stores(run_seed: int) -> list:
         f"https://www.amazon.eg/s?i=beauty&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE",
     ]
     random.shuffle(amazon_extra)
-
     noon_pool = [
         f"https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc&page={p1}",
         f"https://www.noon.com/egypt-ar/electronics-and-mobiles/mobiles-and-accessories/mobiles-20905/?sort[by]=discount&sort[dir]=desc&page={p1}",
@@ -497,45 +357,12 @@ def build_dynamic_stores(run_seed: int) -> list:
         f"https://www.noon.com/egypt-ar/grocery-store/?sort[by]=discount&sort[dir]=desc&page={p1}",
     ]
     random.shuffle(noon_pool)
-
     return [
-        {
-            "id": "amazon", "name": "أمازون مصر (Amazon)", "domain": "https://www.amazon.eg",
-            "type": "amazon", "max_deals": MAX_DEALS_AMAZON,
-            "urls": amazon_guaranteed + amazon_extra[:3]
-        },
-        {
-            "id": "noon", "name": "نون مصر (Noon)", "domain": "https://www.noon.com",
-            "type": "noon", "max_deals": MAX_DEALS_OTHER,
-            "urls": noon_pool[:4]
-        },
-        {
-            "id": "2b", "name": "2B Egypt", "domain": "https://2b.com.eg",
-            "type": "general", "max_deals": MAX_DEALS_OTHER,
-            "urls": [
-                f"https://2b.com.eg/ar/deals.html?p={p1}",
-                f"https://2b.com.eg/ar/computers.html?p={p1}",
-                f"https://2b.com.eg/ar/mobiles-tablets.html?p={p1}",
-                f"https://2b.com.eg/ar/home-appliances.html?p={p1}"
-            ]
-        },
-        {
-            "id": "raneen", "name": "رنين (Raneen)", "domain": "https://www.raneen.com",
-            "type": "general", "max_deals": MAX_DEALS_OTHER,
-            "urls": [
-                f"https://www.raneen.com/ar/deals?p={p1}",
-                "https://www.raneen.com/ar/deals/appliances-electronics-offers",
-                "https://www.raneen.com/ar/mobiles-tablets"
-            ]
-        },
-        {
-            "id": "dream2000", "name": "دريم 2000 (Dream 2000)", "domain": "https://dream2000.com",
-            "type": "general", "max_deals": MAX_DEALS_OTHER,
-            "urls": [
-                f"https://dream2000.com/mobiles.html?p={p1}",
-                f"https://dream2000.com/home-appliances.html?p={p1}"
-            ]
-        }
+        {"id": "amazon", "name": "أمازون مصر (Amazon)", "domain": "https://www.amazon.eg", "type": "amazon", "max_deals": MAX_DEALS_AMAZON, "urls": amazon_guaranteed + amazon_extra[:3]},
+        {"id": "noon", "name": "نون مصر (Noon)", "domain": "https://www.noon.com", "type": "noon", "max_deals": MAX_DEALS_OTHER, "urls": noon_pool[:4]},
+        {"id": "2b", "name": "2B Egypt", "domain": "https://2b.com.eg", "type": "general", "max_deals": MAX_DEALS_OTHER, "urls": [f"https://2b.com.eg/ar/deals.html?p={p1}", f"https://2b.com.eg/ar/computers.html?p={p1}", f"https://2b.com.eg/ar/mobiles-tablets.html?p={p1}", f"https://2b.com.eg/ar/home-appliances.html?p={p1}"]},
+        {"id": "raneen", "name": "رنين (Raneen)", "domain": "https://www.raneen.com", "type": "general", "max_deals": MAX_DEALS_OTHER, "urls": [f"https://www.raneen.com/ar/deals?p={p1}", "https://www.raneen.com/ar/deals/appliances-electronics-offers", "https://www.raneen.com/ar/mobiles-tablets"]},
+        {"id": "dream2000", "name": "دريم 2000 (Dream 2000)", "domain": "https://dream2000.com", "type": "general", "max_deals": MAX_DEALS_OTHER, "urls": [f"https://dream2000.com/mobiles.html?p={p1}", f"https://dream2000.com/home-appliances.html?p={p1}"]}
     ]
 
 def load_json(path: str) -> dict:
@@ -573,35 +400,80 @@ def main():
     t0 = time.time()
     now = int(t0)
     run_seed = int(now // 1800)
-    log(f"🚀 بدأ الرادار المتجدد (V18.1) - دورة التدوير #{run_seed % 10}...")
-
+    log(f"🚀 بدأ الرادار المتجدد (V18.2) - دورة التدوير #{run_seed % 10}...")
     state = load_json(STATE_FILE)
     history = load_json(HISTORY_FILE)
-
     state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_HOURS * 3600}
 
     stores = build_dynamic_stores(run_seed)
-    summary_lines = ["📊 <b>ملخص جولة الصفقات المتجددة (V18.1)</b>", ""]
+    summary_lines = ["📊 <b>ملخص جولة الصفقات المتجددة (V18.2)</b>", ""]
     total_sent = 0
 
     for st in stores:
-        sname = st["name"]
-        stype = st["type"]
+        sname, stype = st["name"], st["type"]
         max_store_deals = st.get("max_deals", MAX_DEALS_OTHER)
         is_amz = (stype == "amazon")
-        found_deals = []
-        opened = False
+        found_deals, opened = [], False
 
         for u in st["urls"]:
             html_txt = smart_fetch(u, sname, is_amazon=is_amz)
             if html_txt:
                 opened = True
-                if is_amz:
-                    extracted = extract_amazon_deals(html_txt, history)
-                elif stype == "noon":
-                    extracted = extract_noon_deals(html_txt, history)
-                else:
-                    extracted = extract_general_deals(html_txt, st["domain"], history)
+                extracted = extract_amazon_deals(html_txt, history) if is_amz else (extract_noon_deals(html_txt, history) if stype == "noon" else extract_general_deals(html_txt, st["domain"], history))
                 log(f"   📦 استُخرج {len(extracted)} عرض من الرابط")
                 found_deals.extend(extracted)
-            time.sleep(random.uniform(1
+            time.sleep(random.uniform(1.0, 2.0))
+
+        unique_deals = {}
+        for d in found_deals:
+            k = norm_title(d["title"])
+            if k and (k not in unique_deals or d["discount"] > unique_deals[k]["discount"]):
+                unique_deals[k] = d
+
+        ordered = sorted(unique_deals.values(), key=lambda x: (x["discount"], x["old"] - x["price"]), reverse=True)
+        sent_store = 0
+
+        for d in ordered:
+            if sent_store >= max_store_deals:
+                break
+            clean_link = d["link"].split("?")[0].rstrip("/").lower()
+            prev = state.get(clean_link)
+            if prev and d["price"] >= prev.get("price", d["price"]) * 0.96:
+                continue
+            saving = d["old"] - d["price"]
+            coupon_line = f"🎟 <b>كوبون إضافي: {htmllib.escape(d['coupon'])}</b>\n" if d.get("coupon") else ""
+            msg = (
+                f"🔥 <b>لقطة جديدة من {htmllib.escape(sname)}</b> (خصم {d['discount']}%)\n\n"
+                f"📦 {htmllib.escape(d['title'])}\n"
+                f"💰 السعر الآن: <b>{d['price']:,} ج.م</b>\n"
+                f"🏷 السعر السابق: {d['old']:,} ج.م (توفير {saving:,} ج.م)\n"
+                f"{coupon_line}🔗 {d['link']}"
+            )
+            if send_telegram(msg, use_html=True):
+                state[clean_link] = {"price": d["price"], "ts": now}
+                sent_store += 1
+                total_sent += 1
+                time.sleep(1.1)
+
+        summary_lines.append(f"✅ {sname}: فُحص {len(unique_deals)} عرض | أُرسل جديد {sent_store}" if opened else f"❌ {sname}: تعذر الفتح في هذه الجولة")
+
+    if len(history) > 8000:
+        history = dict(list(history.items())[-8000:])
+    save_json(STATE_FILE, state)
+    save_json(HISTORY_FILE, history)
+    commit_state()
+
+    elapsed = (time.time() - t0) / 60.0
+    summary_lines.append(f"\n⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي الصفقات الجديدة المرسلة: <b>{total_sent}</b>")
+    summary_text = "\n".join(summary_lines)
+    log("--- انتهت الجولة بنجاح ---\n" + summary_text)
+    send_telegram(summary_text, use_html=True)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        tb = traceback.format_exc()
+        log(tb)
+        send_telegram("❌ خطأ في تشغيل الرادار:\n" + tb[-1500:])
+        sys.exit(1)
