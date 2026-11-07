@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار الصفقات المصري الاحترافي — V27.3 (Final Clean Engine)
-============================================================
-إصلاح جذري ونهائي لاختبارات التحقق الذاتي وضمان التشغيل المستقر الفوري.
+رادار الصفقات المصري الاحترافي — V27.4 (Typo Fixed Engine)
+==========================================================
+تصحيح خطأ الاسم المعرف 'r' وضمان التشغيل الفوري السليم.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import urllib.parse
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-print("⚡ بدء تشغيل محرك الصفقات المعماري الموثق (الإصدار V27.3)...", flush=True)
+print("⚡ بدء تشغيل محرك الصفقات المعماري الموثق (الإصدار V27.4)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -123,7 +123,7 @@ PROTECTED_WORDS_NORM: Set[str] = {normalize_text(w) for w in (
 _CUR_PRICE_RE = re.compile(
     r"(?:(\d{1,3}(?:,\d{3})+|\d{2,6})\s*(?:ج\.?م\.?|جنيه|جنية|EGP|L\.?E\.?)"
     r"|(?:ج\.?م\.?|جنيه|جنية|EGP|L\.?E\.?)\s*(\d{1,3}(?:,\d{3})+|\d{2,6}))",
-    r.I if hasattr(re, 'I') else 2
+    re.I
 )
 _EGP_TOKEN_RE = re.compile(r"(?:ج\.?م|جنيه|جنية|\bEGP\b|\bL\.?E\.?\b)", re.I)
 _FOREIGN_CUR_RE = re.compile(r"(?:\$|€|£|\bUSD\b|\bSAR\b|\bAED\b|\bKWD\b|\bريال\b|\bدرهم\b|\bدولار\b|\bدينار\b)", re.I)
@@ -205,7 +205,7 @@ def commit_state(state: dict, history: dict, rules: dict) -> bool:
             return True
 
         c_res = subprocess.run(
-            ["git", "commit", "-m", "chore: update radar intelligence memory V27.3", "--only", "--"] + target_files,
+            ["git", "commit", "-m", "chore: update radar intelligence memory V27.4", "--only", "--"] + target_files,
             capture_output=True, text=True, check=False
         )
         if c_res.returncode != 0:
@@ -1285,7 +1285,7 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
     ]
 
 
-# ================= الاختبارات الذاتية الـ 25 (مصححة ومضبوطة تماماً) =================
+# ================= الاختبارات الذاتية الـ 25 (مع تصحيح التسمية المعايرة) =================
 
 def run_self_tests() -> None:
     passed_tests = 0
@@ -1390,7 +1390,6 @@ def run_self_tests() -> None:
     )
     check(not ok_weak_drop, "فشل منع الهبوط الطفيف مع تاريخ ضعيف")
 
-    # اختبار التقييم التاريخي مع التحقق المرن من النتيجة المرجعة
     ok_hist_comp, dtype_hc, _, _, conf_hc, _ = evaluate_deal(
         cur=15000, old=0,
         h_stats={"median_30d": 18500, "min_30d": 18000, "obs_days_30d": 5, "history_strength": "strong"},
@@ -1484,7 +1483,7 @@ def main() -> None:
     t0 = time.time()
     now = int(t0)
     run_seed = int(now // 1800)
-    log(f"🚀 تشغيل محرك الصفقات الموثق (V27.3) - دورة #{run_seed % 10}...")
+    log(f"🚀 تشغيل محرك الصفقات الموثق (V27.4) - دورة #{run_seed % 10}...")
 
     state = load_json(STATE_FILE)
     history = load_json(HISTORY_FILE)
@@ -1700,7 +1699,7 @@ def main() -> None:
     git_ok = commit_state(state, history, rules)
 
     elapsed = (time.time() - t0) / 60.0
-    summary_lines = ["📊 <b>ملخص جولة محرك الصفقات الموثق (V27.3)</b>", ""]
+    summary_lines = ["📊 <b>ملخص جولة محرك الصفقات الموثق (V27.4)</b>", ""]
     for st in stores:
         sid, sname = st["id"], st["name"]
         d = store_diag[sid]
