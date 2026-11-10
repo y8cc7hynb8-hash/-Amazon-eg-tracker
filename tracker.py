@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار الصفقات المصري الاحترافي — V31 (Hybrid Market Oracle Engine)
-===================================================================
-الإضافات الهندسية في V31:
-1. دمج موديول "أرخص فين؟" (Arkhas Feen) لتغطية أكثر من 35 متجراً محلياً بضربة واحدة.
-2. تفعيل دور المرجع السوقي (Market Oracle) لرفع دقة مقارنة المتاجر وحل مشكلة (مقارن 0).
-3. استخراج أسعار نون المشطوبة بمرونة كاملة عبر كافة مفاتيح JSON والـ HTML.
-4. مطابقة الموديلات بين المتاجر عبر مفتاح cross_match_key الذكي.
-5. استخراج مبكر للماركات ومواصفات اللابتوبات (RAM حتى 128GB).
-6. حماية وتدقيق كامل لملفات JSON وعزل السجلات التالفة.
+رادار الصفقات المصري الاحترافي — V32 (Production-Grade High Yield & Precise Hardware Matcher)
+=============================================================================================
+المعمارية المحدثة:
+1. مفتاح مطابقة عتاد دقيق (CPU+GPU+RAM+Storage للابتوب / RAM+Storage+5G للهواتف).
+2. استخراج كائن __NEXT_DATA__ لموقع "أرخص فين" لتفعيل صفقات الـ 35 متجراً محلياً فعلياً.
+3. استخراج أسعار نون المشطوبة ونسب الخصم الحقيقية من شجرة JSON وكروت العرض.
+4. التاريخ السعري 2.0: الرصد الفردي لا يُعد إثباتاً تاريخياً إطلاقاً.
+5. معايرة عتبات القبول للسلع المرتفعة لمنع خنق صفقات 2B ودريم وأمازون.
+6. فحص أنواع البيانات في الذاكرة (Data Sanitizer) وقفل تشغيل لمنع التضارب.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import urllib.parse
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-print("⚡ بدء تشغيل محرك الصفقات الهجين مع مرجع أرخص فين (الإصدار V31)...", flush=True)
+print("⚡ بدء تشغيل محرك الصفقات عالي الإنتاجية والمطابقة الدقيقة (الإصدار V32)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -54,13 +54,13 @@ CHAT_ID = os.environ.get("CHAT_ID")
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID")
 
 MIN_DISCOUNT_REGULAR = int(os.environ.get("MIN_DISCOUNT", 10))
-MIN_DISCOUNT_HIGH = 7
-MIN_UNVERIFIED_DISCOUNT = 14
+MIN_DISCOUNT_HIGH = 6
+MIN_UNVERIFIED_DISCOUNT = 12
 MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 75))
 MIN_PRODUCT_PRICE = int(os.environ.get("MIN_PRODUCT_PRICE", 90))
 
-MIN_CONF_VERIFIED = int(os.environ.get("MIN_CONF_VERIFIED", 62))
-MIN_CONF_UNVERIFIED = int(os.environ.get("MIN_CONF_UNVERIFIED", 56))
+MIN_CONF_VERIFIED = int(os.environ.get("MIN_CONF_VERIFIED", 60))
+MIN_CONF_UNVERIFIED = int(os.environ.get("MIN_CONF_UNVERIFIED", 54))
 
 MAX_DEALS_AMAZON = 16
 MAX_DEALS_OTHER = int(os.environ.get("MAX_DEALS_PER_STORE", 10))
@@ -70,6 +70,7 @@ DATA_DIR = "data" if os.path.isdir("data") else "."
 STATE_FILE = os.path.join(DATA_DIR, "sent_deals.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 RULES_FILE = os.path.join(DATA_DIR, "learned_rules.json")
+LOCK_FILE = os.path.join(DATA_DIR, "tracker.lock")
 
 UA_CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 AR_LANG = "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
@@ -134,13 +135,49 @@ _CUR_PRICE_RE = re.compile(
 _EGP_TOKEN_RE = re.compile(r"(?:ج\.?م|جنيه|جنية|\bEGP\b|\bL\.?E\.?\b)", re.I)
 _FOREIGN_CUR_RE = re.compile(r"(?:\$|€|£|\bUSD\b|\bSAR\b|\bAED\b|\bKWD\b|\bريال\b|\bدرهم\b|\bدولار\b|\bدينار\b)", re.I)
 
+# التحقق من وجود كود أو كوبون صريح وليس مجرد عبارة تسويقية
 _REAL_COUPON_RE = re.compile(
-    r"(?:كود\s*خصم|كوبون\s*خصم|قسيمة\s*شراء|قسيمه\s*شراء|تطبيق\s*الكوبون|كود\s*[:\s]\s*[A-Za-z0-9_-]+|\bcoupon\b|\bvoucher\b|\bpromo\s*code\b)",
+    r"(?:كود\s*خصم\s*[:\s]*[A-Za-z0-9_-]+|كوبون\s*[:\s]*[A-Za-z0-9_-]+|قسيمة\s*شراء|قسيمه\s*شراء|\bpromo\s*code\s*[:\s]*[A-Za-z0-9_-]+|\bvoucher\s*code\b)",
     re.I
 )
 
 
-# ================= التحقق من سلامة البيانات وحفظ Git =================
+# ================= قفل التشغيل والتحقق من سلامة البيانات وحفظ Git =================
+
+class ExecutionLock:
+    def __init__(self, filepath: str):
+        self.filepath = filepath
+        self.acquired = False
+
+    def __enter__(self):
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, "r") as f:
+                    old_pid = int(f.read().strip())
+                # فحص ما إذا كان الـ PID قديماً أو متوقفاً
+                try:
+                    os.kill(old_pid, 0)
+                    log(f"⚠ عملية أخرى قيد التشغيل بالفعل (PID: {old_pid})، إيقاف الدورة لتجنب التعارض.")
+                    sys.exit(0)
+                except OSError:
+                    pass
+            except Exception:
+                pass
+        try:
+            with open(self.filepath, "w") as f:
+                f.write(str(os.getpid()))
+            self.acquired = True
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.acquired and os.path.exists(self.filepath):
+            try:
+                os.remove(self.filepath)
+            except Exception:
+                pass
+
 
 def sanitize_state(raw_state: Any) -> dict:
     if not isinstance(raw_state, dict):
@@ -149,44 +186,42 @@ def sanitize_state(raw_state: Any) -> dict:
     for k, v in raw_state.items():
         if isinstance(k, str) and isinstance(v, dict):
             try:
-                price = int(v.get("price", 0))
-                ts = int(v.get("ts", 0))
-                msg_id = int(v.get("message_id", 0))
-                rated_by = [str(u) for u in v.get("rated_by", []) if isinstance(u, (str, int))]
                 clean[k] = {
-                    "price": price,
-                    "ts": ts,
-                    "title": str(v.get("title", "")),
-                    "brand": str(v.get("brand", "")),
-                    "link": str(v.get("link", "")),
-                    "message_id": msg_id,
-                    "rated_by": rated_by
+                    "price": int(v.get("price") or 0),
+                    "ts": int(v.get("ts") or 0),
+                    "title": str(v.get("title") or ""),
+                    "brand": str(v.get("brand") or ""),
+                    "link": str(v.get("link") or ""),
+                    "message_id": int(v.get("message_id") or 0),
+                    "rated_by": [str(u) for u in (v.get("rated_by") or []) if isinstance(u, (str, int))]
                 }
             except (ValueError, TypeError):
                 continue
     return clean
 
 
-def sanitize_history(raw_history: Any) -> dict:
+def sanitize_history(raw_history: Any, now: int) -> dict:
     if not isinstance(raw_history, dict):
         return {}
     clean = {}
     for k, v in raw_history.items():
         if isinstance(k, str) and isinstance(v, dict):
             valid_pts = []
-            for item in v.get("pts", []):
-                if isinstance(item, (list, tuple)) and len(item) == 2:
-                    try:
-                        ts_v = int(item[0])
-                        p_v = int(item[1])
-                        if ts_v > 1600000000 and p_v >= MIN_PRODUCT_PRICE:
-                            valid_pts.append([ts_v, p_v])
-                    except (ValueError, TypeError):
-                        continue
+            raw_pts = v.get("pts")
+            if isinstance(raw_pts, list):
+                for item in raw_pts:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        try:
+                            ts_v = int(item[0])
+                            p_v = int(item[1])
+                            if p_v >= MIN_PRODUCT_PRICE and 1600000000 < ts_v <= now:
+                                valid_pts.append([ts_v, p_v])
+                        except (ValueError, TypeError):
+                            continue
             try:
-                ts_latest = int(v.get("ts", 0))
+                ts_latest = int(v.get("ts") or now)
             except (ValueError, TypeError):
-                ts_latest = int(time.time())
+                ts_latest = now
             clean[k] = {"pts": valid_pts, "ts": ts_latest}
     return clean
 
@@ -196,11 +231,11 @@ def sanitize_rules(raw_rules: Any) -> dict:
         return {}
     return {
         "webhook_cleared": bool(raw_rules.get("webhook_cleared", False)),
-        "last_update_id": int(raw_rules.get("last_update_id", 0) or 0),
-        "blocked_deals": [str(x) for x in raw_rules.get("blocked_deals", []) if isinstance(x, (str, int))],
-        "blocked_keywords": [str(x) for x in raw_rules.get("blocked_keywords", []) if isinstance(x, str)],
-        "word_strikes": {str(k): int(v) for k, v in raw_rules.get("word_strikes", {}).items() if isinstance(v, (int, float))},
-        "liked_brands": {str(k): int(v) for k, v in raw_rules.get("liked_brands", {}).items() if isinstance(v, (int, float))}
+        "last_update_id": int(raw_rules.get("last_update_id") or 0),
+        "blocked_deals": [str(x) for x in (raw_rules.get("blocked_deals") or []) if isinstance(x, (str, int))],
+        "blocked_keywords": [str(x) for x in (raw_rules.get("blocked_keywords") or []) if isinstance(x, str)],
+        "word_strikes": {str(k): int(v) for k, v in (raw_rules.get("word_strikes") or {}).items() if isinstance(v, (int, float))},
+        "liked_brands": {str(k): int(v) for k, v in (raw_rules.get("liked_brands") or {}).items() if isinstance(v, (int, float))}
     }
 
 
@@ -275,7 +310,7 @@ def commit_state(state: dict, history: dict, rules: dict) -> bool:
             return True
 
         c_res = subprocess.run(
-            ["git", "commit", "-m", "chore: update radar intelligence memory V31", "--only", "--"] + target_files,
+            ["git", "commit", "-m", "chore: update radar intelligence memory V32", "--only", "--"] + target_files,
             capture_output=True, text=True, check=False
         )
         if c_res.returncode != 0:
@@ -572,7 +607,7 @@ def clean_title(t: str) -> str:
     return re.sub(r"^[-\u2212\u2013]?\s*\d{1,2}\s?%\s*", "", t)[:185]
 
 
-# ================= الهوية ومفتاح المطابقة بين المتاجر (Cross-Store Matcher) =================
+# ================= الهوية ومفتاح المطابقة بين المتاجر (Category-Specific Specs) =================
 
 _BRAND_ALIASES = {
     "سامسونج": "samsung", "ابل": "apple", "ايفون": "apple", "ايباد": "apple",
@@ -701,6 +736,7 @@ def analyze_product_identity(title: str) -> Dict[str, Any]:
     t = re.sub(r"الجيل\s+الرابع", " 4g ", t)
     t = re.sub(r"بوصه|بوصة|انش|inches|\"|''", " inch ", t)
 
+    # استخراج المعالج كاملاً
     cpu_tokens = []
     cpu_full_re = re.compile(r"\b(i[3579]|ryzen\s*[3579])\s*[-_]?\s*(\d{4,5}[a-z]{0,3})\b")
     for m_cpu in cpu_full_re.finditer(t):
@@ -817,36 +853,53 @@ def analyze_product_identity(title: str) -> Dict[str, Any]:
     if has_exact_id:
         model_tag = "-".join(models) if models else "-".join(core_sorted[:3])
         sig = f"{cat}|{brand}|M:{model_tag}|{spec_str}"
-        primary_storage = storage_vals[0] if storage_vals else ""
-        primary_inch = inch_vals[0] if inch_vals else ""
-        primary_spec = primary_storage or primary_inch
-        essential_tier = tiers_sorted[0] if tiers_sorted else ""
-        cross_match_key = f"{cat}|{brand}|{model_tag}|{primary_spec}|{essential_tier}"
+
+        # بناء مفتاح مطابقة عتاد دقيق حسب الفئة لمنع مقارنة أجهزة مختلفة
+        if cat == "LAP":
+            primary_cpu = cpu_sorted[0] if cpu_sorted else ""
+            primary_gpu = gpu_sorted[0] if gpu_sorted else ""
+            primary_ram = ram_vals[0] if ram_vals else ""
+            primary_storage = storage_vals[0] if storage_vals else ""
+            cross_match_key = f"LAP|{brand}|{model_tag}|{primary_cpu}|{primary_gpu}|{primary_ram}|{primary_storage}"
+        elif cat == "MOB":
+            primary_ram = ram_vals[0] if ram_vals else ""
+            primary_storage = storage_vals[0] if storage_vals else ""
+            net_tier = "5g" if "5g" in tiers_sorted else ("4g" if "4g" in tiers_sorted else "")
+            cross_match_key = f"MOB|{brand}|{model_tag}|{primary_ram}|{primary_storage}|{net_tier}"
+        elif cat == "TV":
+            primary_inch = inch_vals[0] if inch_vals else ""
+            primary_tech = tv_tech[0] if tv_tech else ""
+            cross_match_key = f"TV|{brand}|{model_tag}|{primary_inch}|{primary_tech}"
+        else:
+            primary_storage = storage_vals[0] if storage_vals else ""
+            cross_match_key = f"{cat}|{brand}|{model_tag}|{primary_storage}"
+
         return {"sig": sig, "cross_match_key": cross_match_key, "exact_model": True, "brand": brand, "category": cat}
 
     sig = f"{cat}|{brand}|W:{'-'.join(core_sorted)}|{spec_str}"
     return {"sig": sig, "cross_match_key": "", "exact_model": False, "brand": brand, "category": cat}
 
 
-# ================= سجل الأسعار ومنع الطوابع المستقبلية =================
+# ================= سجل الأسعار 2.0 =================
 
 def record_and_analyze_history(history: dict, clean_link: str, cur_price: int, now: int) -> Dict[str, Any]:
     rec = history.get(clean_link)
     daily_buckets: Dict[int, Tuple[int, int]] = {}
 
     if isinstance(rec, dict):
-        raw_pts = rec.get("pts") or []
-        for item in raw_pts:
-            if isinstance(item, (list, tuple)) and len(item) == 2 and not isinstance(item[0], bool):
-                try:
-                    ts_v = int(item[0])
-                    p_v = int(item[1])
-                    if p_v >= MIN_PRODUCT_PRICE and 1600000000 < ts_v <= now:
-                        day_key = ts_v // DAY
-                        if day_key not in daily_buckets or ts_v >= daily_buckets[day_key][0]:
-                            daily_buckets[day_key] = (ts_v, p_v)
-                except (ValueError, TypeError):
-                    continue
+        raw_pts = rec.get("pts")
+        if isinstance(raw_pts, list):
+            for item in raw_pts:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    try:
+                        ts_v = int(item[0])
+                        p_v = int(item[1])
+                        if p_v >= MIN_PRODUCT_PRICE and 1600000000 < ts_v <= now:
+                            day_key = ts_v // DAY
+                            if day_key not in daily_buckets or ts_v >= daily_buckets[day_key][0]:
+                                daily_buckets[day_key] = (ts_v, p_v)
+                    except (ValueError, TypeError):
+                        continue
 
     cutoff_90 = now - 90 * DAY
     cutoff_30 = now - 30 * DAY
@@ -859,11 +912,12 @@ def record_and_analyze_history(history: dict, clean_link: str, cur_price: int, n
     obs_30 = len(sorted_pts_30)
     span_days_30 = ((sorted_pts_30[-1][0] - sorted_pts_30[0][0]) // DAY) if obs_30 >= 2 else 0
 
-    if obs_30 >= 4 and span_days_30 >= 5:
+    # معايرة قوة التاريخ 2.0: الرصد الفردي لا يمثل دليلاً تاريخياً
+    if obs_30 >= 6 and span_days_30 >= 7:
         strength = "strong"
-    elif obs_30 >= 2 and span_days_30 >= 2:
+    elif obs_30 >= 4 and span_days_30 >= 4:
         strength = "medium"
-    elif obs_30 >= 1:
+    elif obs_30 >= 2 and span_days_30 >= 1:
         strength = "weak"
     else:
         strength = "none"
@@ -904,7 +958,7 @@ def evaluate_deal(
     median_30d = int(h_stats.get("median_30d", 0) or 0)
     min_30d = int(h_stats.get("min_30d", 0) or 0)
     obs_days_30d = int(h_stats.get("obs_days_30d", 0) or 0)
-    strength = str(h_stats.get("history_strength") or ("medium" if obs_days_30d >= 2 else "none"))
+    strength = str(h_stats.get("history_strength") or "none")
 
     has_competitor = exact_model and market_lowest_other > 0
     competitor_is_much_cheaper = has_competitor and market_lowest_other < cur * 0.92
@@ -912,19 +966,20 @@ def evaluate_deal(
     is_cheaper_than_market = has_competitor and market_lowest_other > cur
     has_market_deal_proof = has_competitor and (cur * 1.05 <= market_lowest_other <= cur * 1.85)
 
-    has_history_proof = strength in ("strong", "medium", "weak") and median_30d > 0
+    # الرصد الفردي (obs_days_30d < 2) لا يدخل في إثبات التاريخ مطلقاً
+    has_history_proof = strength in ("strong", "medium", "weak") and median_30d > 0 and obs_days_30d >= 2
 
     if competitor_is_much_cheaper:
         return (False, "", 0, 0, 0, "much_cheaper_competitor_exists")
 
     c_extra = (6 if has_coupon else 0) + (3 if brand_liked else 0)
-    hist_weights = {"strong": 34, "medium": 30, "weak": 24, "none": 12}
+    hist_weights = {"strong": 34, "medium": 30, "weak": 22, "none": 10}
 
     # 1. المسار الأول (أرخص بين المتاجر المفحوصة)
-    if has_market_deal_proof and market_lowest_other >= cur * 1.06:
+    if has_market_deal_proof and market_lowest_other >= cur * 1.05:
         gap_pct = round((market_lowest_other - cur) / market_lowest_other * 100)
         saving = market_lowest_other - cur
-        if gap_pct >= 6 and (saving >= 150 or cur < 1500):
+        if gap_pct >= 5 and (saving >= 150 or cur < 1500):
             c_hist = 22 if (has_history_proof and cur <= median_30d) else (8 if median_30d > 0 and cur > median_30d * 1.05 else 14)
             c_match = 18
             c_market = 36
@@ -937,8 +992,8 @@ def evaluate_deal(
     if has_history_proof and median_30d > cur and (min_30d == 0 or cur <= min_30d):
         drop_pct = round((median_30d - cur) / median_30d * 100)
         saving = median_30d - cur
-        min_req_drop = 10 if strength == "weak" else 7
-        if min_req_drop <= drop_pct <= 60 and (saving >= 120 or drop_pct >= 10):
+        min_req_drop = 12 if strength == "weak" else 7
+        if min_req_drop <= drop_pct <= 60 and (saving >= 120 or drop_pct >= 9):
             if competitor_is_slightly_cheaper and strength == "weak":
                 return (False, "", 0, 0, 0, "competitor_slightly_cheaper_weak_history")
 
@@ -980,7 +1035,8 @@ def evaluate_deal(
             else:
                 if has_competitor and not is_cheaper_than_market:
                     return (False, "", 0, 0, 0, "not_cheaper_than_competitor")
-                if (has_coupon and disc >= 8) or (cur >= 1500 and (disc >= 10 or saving >= 250)) or (disc >= MIN_UNVERIFIED_DISCOUNT and saving >= 150):
+                # معايرة دقيقة لضمان ظهور عروض المتاجر التنافسية
+                if (has_coupon and disc >= 8) or (cur >= 1500 and (disc >= 8 or saving >= 200)) or (disc >= MIN_UNVERIFIED_DISCOUNT and saving >= 120):
                     c_base = 35
                     c_match = 16 if exact_model else 12
                     c_auth = min(20, 10 + disc // 3)
@@ -1009,7 +1065,7 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
             return True
         if "data-asin" not in text and "/dp/" not in text:
             return True
-    elif len(text) < 2500:
+    elif len(text) < 2000:
         return True
 
     m = re.search(r"<title[^>]*>(.*?)</title>", head, re.I | re.S)
@@ -1262,61 +1318,92 @@ def extract_noon_items(html_text: str, custom_blocked: Set[str]) -> List[dict]:
 
 def extract_arkhasfeen_items(html_text: str, custom_blocked: Set[str]) -> List[dict]:
     """
-    محرك استخراج موقع أرخص فين (Arkhas Feen):
-    - يستخرج اسم المنتج، السعر الحالي، السعر المشطوب إن وجد، واسم المتجر المحلي الحقيقي.
+    محرك استخراج موقع أرخص فين المحدث:
+    - يقرأ أولاً كائن __NEXT_DATA__ لاستخراج الصفقات من الـ JSON الخام لمنع مشاكل الـ Hydration.
+    - يدعم كروت DOM كمسار بديل.
     """
     items = []
     seen_links = set()
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # فحص كروت المنتجات في أرخص فين
-    cards = soup.find_all(["div", "article", "li"], class_=re.compile(r"product|deal|card|item", re.I))
-    for card in cards:
-        a_tag = card.find("a", href=True)
-        if not a_tag or not a_tag["href"].strip():
-            continue
-        link = urllib.parse.urljoin("https://arkhasfeen.com", a_tag["href"].strip()).split("?")[0]
-        if link in seen_links or "/product/" not in link and "/p/" not in link and "/deals" in link:
-            continue
+    next_script = soup.find("script", id="__NEXT_DATA__")
+    if next_script and next_script.string:
+        try:
+            root_json = json.loads(next_script.string)
+            stack = [root_json]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    # فحص كائنات المنتجات في أرخص فين
+                    name = node.get("title") or node.get("name")
+                    price_val = node.get("price") or node.get("best_price") or node.get("lowest_price")
+                    slug = node.get("slug") or node.get("url") or node.get("id")
 
-        _strip_installment_nodes(card)
+                    if isinstance(name, str) and len(name) >= 6 and price_val is not None:
+                        cur = parse_price(price_val, custom_blocked, explicit_egp=True)
+                        old = parse_price(node.get("old_price") or node.get("regular_price"), custom_blocked, explicit_egp=True)
+                        store_name = str(node.get("store") or node.get("merchant") or node.get("seller") or "متجر محلي")
+                        prod_url = f"https://arkhasfeen.com/p/{slug}" if slug else "https://arkhasfeen.com/deals"
 
-        t_el = card.find(["h2", "h3", "h4", "strong"], class_=re.compile(r"title|name|header", re.I)) or a_tag
-        title = clean_title(t_el.get_text(" ", strip=True) if t_el else "")
-        if len(title) < 6 or has_installment_or_blocked(title, custom_blocked):
-            continue
+                        if cur >= MIN_PRODUCT_PRICE and prod_url not in seen_links and not has_installment_or_blocked(name, custom_blocked):
+                            seen_links.add(prod_url)
+                            items.append({
+                                "title": clean_title(name),
+                                "price": cur,
+                                "old": old if old > cur else 0,
+                                "link": prod_url,
+                                "coupon": "",
+                                "seller": store_name
+                            })
+                    for v in node.values():
+                        if isinstance(v, (dict, list)):
+                            stack.append(v)
+                elif isinstance(node, list):
+                    for v in node:
+                        if isinstance(v, (dict, list)):
+                            stack.append(v)
+        except Exception:
+            pass
 
-        # استخراج اسم المتجر الحقيقي (مثل: راية، بي تك، كارفور) إن وُجد في الكارت
-        seller_el = card.find(class_=re.compile(r"store|merchant|seller|shop", re.I))
-        seller_name = seller_el.get_text(" ", strip=True) if seller_el else "متجر محلي"
+    # مسار بديل عبر كروت DOM
+    if not items:
+        cards = soup.find_all(["div", "article", "li"], class_=re.compile(r"product|deal|card|item", re.I))
+        for card in cards:
+            a_tag = card.find("a", href=True)
+            if not a_tag or not a_tag["href"].strip():
+                continue
+            link = urllib.parse.urljoin("https://arkhasfeen.com", a_tag["href"].strip()).split("?")[0]
+            if link in seen_links:
+                continue
 
-        # قراءة الأسعار
-        cur = old = 0
-        sp_el = card.find(class_=re.compile(r"price|current|now|special", re.I))
-        old_el = card.find(class_=re.compile(r"old|was|before|strike", re.I)) or card.find(["del", "s"])
+            _strip_installment_nodes(card)
+            t_el = card.find(["h2", "h3", "h4", "strong"], class_=re.compile(r"title|name|header", re.I)) or a_tag
+            title = clean_title(t_el.get_text(" ", strip=True) if t_el else "")
+            if len(title) < 6 or has_installment_or_blocked(title, custom_blocked):
+                continue
 
-        if sp_el:
-            cur = parse_price(sp_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
-        if old_el:
-            old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
+            seller_el = card.find(class_=re.compile(r"store|merchant|seller|shop", re.I))
+            seller_name = seller_el.get_text(" ", strip=True) if seller_el else "متجر محلي"
 
-        if not cur:
-            for pt in card.find_all(class_=re.compile(r"price", re.I)):
-                v = parse_price(pt.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
-                if v >= MIN_PRODUCT_PRICE:
-                    cur = v
-                    break
+            cur = old = 0
+            sp_el = card.find(class_=re.compile(r"price|current|now|special", re.I))
+            old_el = card.find(class_=re.compile(r"old|was|before|strike", re.I)) or card.find(["del", "s"])
 
-        if cur >= MIN_PRODUCT_PRICE:
-            seen_links.add(link)
-            items.append({
-                "title": title,
-                "price": cur,
-                "old": old if old > cur else 0,
-                "link": link,
-                "coupon": "",
-                "seller": seller_name
-            })
+            if sp_el:
+                cur = parse_price(sp_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
+            if old_el:
+                old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
+
+            if cur >= MIN_PRODUCT_PRICE:
+                seen_links.add(link)
+                items.append({
+                    "title": title,
+                    "price": cur,
+                    "old": old if old > cur else 0,
+                    "link": link,
+                    "coupon": "",
+                    "seller": seller_name
+                })
     return items
 
 
@@ -1459,14 +1546,14 @@ def main() -> None:
     t0 = time.time()
     now = int(t0)
     run_seed = int(now // 1800)
-    log(f"🚀 تشغيل محرك الصفقات الهجين مع مرجع أرخص فين (V31) - دورة #{run_seed % 10}...")
+    log(f"🚀 تشغيل محرك الصفقات الهجين مع مرجع أرخص فين (V32) - دورة #{run_seed % 10}...")
 
     raw_state = load_json(STATE_FILE)
     raw_history = load_json(HISTORY_FILE)
     raw_rules = load_json(RULES_FILE)
 
     state = sanitize_state(raw_state)
-    history = sanitize_history(raw_history)
+    history = sanitize_history(raw_history, now)
     rules = sanitize_rules(raw_rules)
 
     process_telegram_feedback(rules, state)
@@ -1501,7 +1588,6 @@ def main() -> None:
                 else:
                     ext = extract_general_items(html_txt, st["domain"], custom_blocked)
                 for item in ext:
-                    # في أرخص فين، إذا وُجد اسم المتجر الفعلي (مثل راية أو بي تك)، نُدرجه في اسم المصدر
                     if stype == "arkhasfeen" and item.get("seller") and item["seller"] != "متجر محلي":
                         item["store"] = f"أرخص فين ({item['seller']})"
                     else:
@@ -1689,7 +1775,7 @@ def main() -> None:
     git_ok = commit_state(state, history, rules)
 
     elapsed = (time.time() - t0) / 60.0
-    summary_lines = ["📊 <b>ملخص جولة محرك الصفقات المعتمد (V31)</b>", ""]
+    summary_lines = ["📊 <b>ملخص جولة محرك الصفقات الهجين (V32)</b>", ""]
     for st in stores:
         sid, sname = st["id"], st["name"]
         d = store_diag[sid]
@@ -1709,10 +1795,11 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        tb = traceback.format_exc()
-        log(tb)
-        send_telegram_summary("❌ خطأ غير متوقع في الرادار:\n" + tb[-1500:])
-        sys.exit(1)
+    with ExecutionLock(LOCK_FILE):
+        try:
+            main()
+        except Exception:
+            tb = traceback.format_exc()
+            log(tb)
+            send_telegram_summary("❌ خطأ غير متوقع في الرادار:\n" + tb[-1500:])
+            sys.exit(1)
