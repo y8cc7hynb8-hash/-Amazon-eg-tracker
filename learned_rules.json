@@ -1,1 +1,1 @@
-{"webhook_cleared":true,"last_update_id":0,"blocked_deals":[],"blocked_keywords":[],"word_strikes":{},"liked_brands":{},"store_discount_modifiers":{},"stats":{"total_positive":0,"total_negative":0,"last_decay_ts":1794297825}}
+{"webhook_cleared":true,"last_update_id":0,"blocked_deals":[],"blocked_keywords":[],"blocked_bigrams":[],"word_strikes":{},"bigram_strikes":{},"liked_brands":{},"category_affinity":{},"store_discount_modifiers":{},"stats":{"total_positive":0,"total_negative":0,"last_decay_ts":1794297825}}
