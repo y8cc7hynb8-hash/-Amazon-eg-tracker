@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار الصفقات المصري الاحترافي — V36 (Mega-Scale Multi-Thread & All-Categories Engine)
-======================================================================================
-الترقيات الجذرية في V36:
-1. محرك فحص متوازي فائق السرعة (ThreadPoolExecutor - 6 Workers) لفحص آلاف المنتجات في دقائق.
-2. تغطية شاملة لكل الأقسام: (البقالة والسوبرماركت، العطور، الملابس والأحذية، الساعات، العدد اليدوية، الإلكترونيات، الأجهزة المنزلية).
-3. تقييم ذكي حسب الفئة (Category-Aware Evaluation): السماح بمنتجات البقالة والمنظفات من 35 ج.م بدون اشتراط توفير 200 ج.م.
-4. التعلم الذاتي 4.0:
-   - تعلم الأقسام المفضلة (Category Affinity) لزيادة حصتها تلقائياً.
-   - تعلم العبارات الثنائية المشبوهة (Bigram Strike Learning) مع تآكل زمني دوري.
-   - تكييف عتبة الخصم لكل متجر حسب مصداقيته.
-5. استخراج ذكي للعطور (حجم الزجاجة ml والتركيز EDP/EDT) وللبقالة (الوزن g/kg/L والعدد) وللعدد اليدوية.
-6. حماية مضاعفة ضد الحظر مع تدوير الجلسات والبصمات (Multi-Session Fingerprint Rotation).
+رادار الصفقات المصري الاحترافي — V37 (Hyper-Scale 3500+ Items & True-Deal Shield)
+=================================================================================
+التطويرات الجذرية في V37:
+1. محرك فحص فائق السعة (12 مساراً متوازياً + المسح المزدوج للصفحات Multi-Page Sweep) لتخطي 2500-4000 منتج.
+2. إضافة متجر جوميا مصر (Jumia Egypt Flash Sales & Grocery/Fashion/Tools) لزيادة التغطية والمقارنة.
+3. إصلاح جذري لاستخراج "أرخص فين" عبر قراءة بيانات React Server Components (__next_f) والـ HTML الخام.
+4. درع الصفقات الحقيقية (True-Deal Shield):
+   - فلتر جودة التقييمات (استبعاد المنتجات ذات التقييم المنخفض < 3.4 نجوم).
+   - حارس التضخم الكاذب (كشف الأسعار المشطوبة المبالغ فيها وقصها رياضياً قبل التقييم).
+5. دعم استخراج عروض السوبرماركت والبقالة والعطور والساعات من شارات الخصم المئوية والنصية.
+6. التعلم الذاتي 4.0 مع حفظ مستمر للذاكرة وتوزيع متوازن للأقسام.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ import urllib.parse
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-print("⚡ بدء تشغيل محرك الصفقات العملاق متعدد الأقسام والخيوط (الإصدار V36)...", flush=True)
+print("⚡ بدء تشغيل محرك الصفقات فائق السعة مع درع الصفقات الحقيقية (الإصدار V37)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -57,22 +56,22 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID")
 
-MIN_DISCOUNT_REGULAR = int(os.environ.get("MIN_DISCOUNT", 10))
-MIN_DISCOUNT_HIGH = 6
-MIN_UNVERIFIED_DISCOUNT = 12
-MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 80))
+MIN_DISCOUNT_REGULAR = int(os.environ.get("MIN_DISCOUNT", 12))
+MIN_DISCOUNT_HIGH = 7
+MIN_UNVERIFIED_DISCOUNT = 14
+MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 75))
 
-# خفض الحد الأدنى للسماح بعروض البقالة والمنظفات والعدد اليدوية الحقيقية
 MIN_PRODUCT_PRICE_GLOBAL = int(os.environ.get("MIN_PRODUCT_PRICE", 35))
 
-MIN_CONF_VERIFIED = int(os.environ.get("MIN_CONF_VERIFIED", 56))
-MIN_CONF_UNVERIFIED = int(os.environ.get("MIN_CONF_UNVERIFIED", 50))
+MIN_CONF_VERIFIED = int(os.environ.get("MIN_CONF_VERIFIED", 60))
+MIN_CONF_UNVERIFIED = int(os.environ.get("MIN_CONF_UNVERIFIED", 54))
 
-MAX_DEALS_AMAZON = 24
-MAX_DEALS_NOON = 16
+MAX_DEALS_AMAZON = 26
+MAX_DEALS_NOON = 18
+MAX_DEALS_JUMIA = 12
 MAX_DEALS_OTHER = int(os.environ.get("MAX_DEALS_PER_STORE", 10))
 REALERT_HOURS = 48
-MAX_WORKERS = 6
+MAX_WORKERS = 12
 
 DATA_DIR = "data" if os.path.isdir("data") else "."
 STATE_FILE = os.path.join(DATA_DIR, "sent_deals.json")
@@ -106,6 +105,15 @@ def safe_int(v: Any, default: int = 0) -> int:
         return default
 
 
+def safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(str(v).strip())
+    except (ValueError, TypeError):
+        return default
+
+
 def normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -127,7 +135,6 @@ BASE_INSTALLMENT_WORDS = tuple(normalize_text(w) for w in (
     "تقسيط", "أقساط", "اقساط", "installment", "/mo", "بدون فوائد", "دفعة مقدمة", "تمويل"
 ))
 
-# إكسسوارات الموبايل الرخيصة فقط (تم استثناء الشنط والأحزمة والساعات لأنها أقسام مطلوبة)
 PHONE_ACCESSORY_WORDS_NORM: Set[str] = {normalize_text(w) for w in (
     "جراب", "اسكرينه", "اسكرينة", "لاصقه حمايه", "لاصقة حماية",
     "phone case", "screen protector", "tempered glass", "حامل موبايل", "وصله شاحن"
@@ -151,7 +158,7 @@ PROTECTED_WORDS_NORM: Set[str] = {normalize_text(w) for w in (
     "skechers", "سكيتشرز", "defacto", "ديفاكتو", "lc waikiki", "وايكيكي",
     "lattafa", "لطافه", "armaf", "ارماف", "afnan", "افنان", "rasasi", "رصاصي",
     "sauvage", "سوفاج", "dior", "ديور", "chanel", "شانيل", "versace", "فرزاتشي",
-    "bosch", "بوش", "makita", "ماكيتا", "dewalt", "ديوالت", "stanley", "ستانلي",
+    "bosch", "بوش", "makita", "ماكيتا", "dewalt", "ديوالت", "stanلي", "stanley",
     "total", "توتال", "ingco", "انجكو", "apt", "crown", "كراون",
     "nescafe", "نسكافيه", "lipton", "ليبتون", "ariel", "اريال", "persil", "برسيل",
     "tide", "تايد", "downy", "داوني", "fairy", "فيري", "crystal", "كريستال",
@@ -316,7 +323,7 @@ def commit_state(state: dict, history: dict, rules: dict) -> bool:
             return True
 
         c_res = subprocess.run(
-            ["git", "commit", "-m", "chore: update radar intelligence memory V36", "--only", "--"] + target_files,
+            ["git", "commit", "-m", "chore: update radar intelligence memory V37", "--only", "--"] + target_files,
             capture_output=True, text=True, check=False
         )
         if c_res.returncode != 0:
@@ -607,6 +614,8 @@ def get_canonical_store_id(store_str: str) -> str:
         return "amazon"
     if any(k in s for k in ("noon", "نون")):
         return "noon"
+    if any(k in s for k in ("jumia", "جوميا")):
+        return "jumia"
     if any(k in s for k in ("2b", "تو بي")):
         return "2b"
     if any(k in s for k in ("raneen", "رنين")):
@@ -704,18 +713,14 @@ _BRAND_ALIASES = {
     "ايسر": "acer", "فيليبس": "philips", "براون": "braun", "تيفال": "tefal",
     "تروفال": "truval", "مولينكس": "moulinex", "كينوود": "kenwood", "كارشر": "karcher",
     "اتش بي": "hp", "ال جي": "lg",
-    # ساعات وموضة
     "كاسيو": "casio", "سيكو": "seiko", "سيتيزن": "citizen", "فوسيل": "fossil",
     "تومي": "tommy", "اديداس": "adidas", "نايكي": "nike", "نايك": "nike",
     "بوما": "puma", "سكيتشرز": "skechers", "ديفاكتو": "defacto", "وايكيكي": "lcwaikiki",
-    # عطور وتجميل
     "لطافه": "lattafa", "لطافة": "lattafa", "ارماف": "armaf", "افنان": "afnan",
     "رصاصي": "rasasi", "ديور": "dior", "شانيل": "chanel", "فرزاتشي": "versace",
     "لوريال": "loreal", "نيفيا": "nivea", "غارنييه": "garnier", "ميبيلين": "maybelline",
-    # عدد يدوية وكهربائية
     "بوش": "bosch", "ماكيتا": "makita", "ديوالت": "dewalt", "ستانلي": "stanley",
     "توتال": "total", "انجكو": "ingco", "كراون": "crown", "بلاك اند ديكر": "blackanddecker",
-    # بقالة وسوبرماركت
     "نسكافيه": "nescafe", "ليبتون": "lipton", "اريال": "ariel", "برسيل": "persil",
     "تايد": "tide", "داوني": "downy", "فيري": "fairy", "كريستال": "crystal",
     "جهينه": "juhayna", "المراعي": "almarai", "نستله": "nestle", "احمد تي": "ahmadtea",
@@ -818,7 +823,6 @@ def _extract_ram_and_storage(t: str, is_laptop_context: bool) -> Tuple[List[str]
 
 
 def _extract_volume_and_weight(t: str) -> List[str]:
-    """استخراج الأحجام والأوزان (مل، جرام، كيلو، لتر) للعطور والبقالة."""
     specs = []
     for m in re.finditer(r"\b(\d+(?:\.\d+)?)\s*(ml|مل|ملي|ملل|g|gm|جم|جرام|غ|kg|كجم|كيلو|l|لتر|قطعه|قطعة|كتله)\b", t):
         val = m.group(1)
@@ -904,7 +908,6 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
     tiers_set = {tok for tok in tokens if tok in _TIER_WORDS}
     tv_tech = sorted({tok for tok in tokens if tok in _TV_TECH_WORDS})
 
-    # تحديد الفئة بدقة عالية (بما يشمل البقالة، العطور، الساعات، الملابس، العدد)
     if any(p in t for p in _PERFUME_WORDS) or hint_cat == "PERF":
         cat = "PERF"
     elif any(w in t for w in _WATCH_WORDS) or brand in ("casio", "seiko", "citizen", "fossil") or hint_cat == "WATCH":
@@ -1069,7 +1072,7 @@ def record_and_analyze_history(history: dict, clean_link: str, cur_price: int, n
     return stats
 
 
-# ================= محرك التقييم التكيفي متعدد الأقسام (Category-Aware Evaluator) =================
+# ================= محرك التقييم ودرع الصفقات الحقيقية (True-Deal Shield) =================
 
 CATEGORY_LABELS_AR = {
     "GROC": "🛒 بقالة وسوبرماركت",
@@ -1095,20 +1098,24 @@ def evaluate_deal(
     has_coupon: bool = False,
     brand_liked: bool = False,
     cat_bonus: int = 0,
-    store_disc_mod: int = 0
+    store_disc_mod: int = 0,
+    rating: float = 0.0
 ) -> Tuple[bool, str, int, int, int, str]:
-    # تحديد الحد الأدنى للسعر والتوفير حسب نوع القسم (للسماح بعروض البقالة والعدد والعطور)
+    # درع التقييمات: استبعاد السلع ذات التقييم السيئ (< 3.4 من 5) لمنع المنتجات الرديئة
+    if 0.1 <= rating < 3.4:
+        return (False, "", 0, 0, 0, "low_product_rating")
+
     if cat == "GROC":
         min_price_cat = 35
         min_saving_unverified = 20
-        base_unverified_disc = 15
+        base_unverified_disc = 14
     elif cat in ("PERF", "FASH", "TOOLS", "WATCH"):
         min_price_cat = 75
         min_saving_unverified = 45
-        base_unverified_disc = 14
+        base_unverified_disc = 15
     else:
-        min_price_cat = 90
-        min_saving_unverified = 90
+        min_price_cat = 95
+        min_saving_unverified = 110
         base_unverified_disc = MIN_UNVERIFIED_DISCOUNT
 
     if cur < min_price_cat:
@@ -1130,10 +1137,11 @@ def evaluate_deal(
     if competitor_is_much_cheaper:
         return (False, "", 0, 0, 0, "much_cheaper_competitor_exists")
 
-    c_extra = (3 if brand_liked else 0) + min(4, max(-3, cat_bonus))
+    rating_bonus = 3 if rating >= 4.3 else (1 if rating >= 4.0 else 0)
+    c_extra = (3 if brand_liked else 0) + min(4, max(-3, cat_bonus)) + rating_bonus
     hist_weights = {"strong": 34, "medium": 30, "weak": 22, "none": 10}
 
-    effective_unverified_disc = max(8, base_unverified_disc + store_disc_mod)
+    effective_unverified_disc = max(10, base_unverified_disc + store_disc_mod)
 
     # 1. المسار الأول (أرخص بين المتاجر المفحوصة)
     if has_market_deal_proof and market_lowest_other >= cur * 1.05:
@@ -1166,17 +1174,18 @@ def evaluate_deal(
                 label = "هبوط تاريخي بالمتجر (يتوفر منافس قريب)" if competitor_is_slightly_cheaper else "هبوط سعر صامت موثق"
                 return (True, label, median_30d, drop_pct, total_conf, "ok")
 
-    # 3. المسار الثالث (الخصم المعلن)
+    # 3. المسار الثالث (الخصم المعلن مع درع مكافحة الأسعار الوهمية المنتفخة)
     if old > cur:
-        if median_30d > 0 and cur > median_30d * 1.05 and not has_market_deal_proof:
+        # إذا كان السعر الحالي أعلى من وسيط الـ 30 يوماً، فهذا خصم وهمي تماماً
+        if median_30d > 0 and cur > median_30d * 1.03 and not has_market_deal_proof:
             return (False, "", 0, 0, 0, "fake_inflated_old_price")
 
         if competitor_is_slightly_cheaper:
             return (False, "", 0, 0, 0, "not_cheaper_than_competitor")
 
         effective_old = old
-        if median_30d > 0 and old > median_30d * 1.25:
-            effective_old = int(median_30d * 1.10)
+        if median_30d > 0 and old > median_30d * 1.22:
+            effective_old = int(median_30d * 1.08)
 
         if effective_old > cur:
             disc = round((effective_old - cur) / effective_old * 100)
@@ -1184,8 +1193,12 @@ def evaluate_deal(
             if disc > MAX_REALISTIC_DISC:
                 return (False, "", 0, 0, 0, "unrealistic_discount_pct")
 
+            # رفض الخصومات غير الموثقة المبالغ فيها (> 52%) للأجهزة بدون ماركة معروفة لأنها غالباً وهمية
+            if not has_history_proof and not has_market_deal_proof and disc > 52 and not exact_model:
+                return (False, "", 0, 0, 0, "suspicious_unverified_high_disc")
+
             if strength in ("strong", "medium") or has_market_deal_proof:
-                if (cur >= 1500 and (disc >= MIN_DISCOUNT_HIGH or saving >= 150)) or (disc >= MIN_DISCOUNT_REGULAR):
+                if (cur >= 1500 and (disc >= MIN_DISCOUNT_HIGH or saving >= 160)) or (disc >= MIN_DISCOUNT_REGULAR):
                     c_proof = 30 if (strength == "strong" or (has_history_proof and has_market_deal_proof)) else 24
                     c_match = 18 if exact_model else 14
                     c_auth = min(24, 14 + disc // 3)
@@ -1195,18 +1208,17 @@ def evaluate_deal(
             else:
                 if has_competitor and not is_cheaper_than_market:
                     return (False, "", 0, 0, 0, "not_cheaper_than_competitor")
-                # شروط مرنة تسمح بمرور البقالة والعطور والملابس والعدد بالإضافة للإلكترونيات
                 is_good_unverified = (
-                    (has_coupon and disc >= 6)
-                    or (cur >= 1500 and (disc >= 7 or saving >= 160))
+                    (has_coupon and disc >= 8)
+                    or (cur >= 1800 and (disc >= 9 or saving >= 220))
                     or (disc >= effective_unverified_disc and saving >= min_saving_unverified)
-                    or (cat in ("GROC", "PERF", "FASH", "TOOLS", "WATCH") and disc >= 18 and saving >= 20)
+                    or (cat in ("GROC", "PERF", "FASH", "TOOLS", "WATCH") and disc >= 16 and saving >= 20)
                 )
                 if is_good_unverified:
-                    c_base = 36
-                    c_match = 16 if exact_model else 13
+                    c_base = 35
+                    c_match = 16 if exact_model else 12
                     c_auth = min(20, 10 + disc // 3)
-                    total_conf = min(75, c_base + c_match + c_auth + c_extra)
+                    total_conf = min(76, c_base + c_match + c_auth + c_extra)
                     if total_conf >= MIN_CONF_UNVERIFIED:
                         return (True, "خصم معلن غير مؤكد (قيد التوثيق)", effective_old, disc, total_conf, "ok")
                 return (False, "", 0, 0, 0, "unverified_low_discount")
@@ -1214,7 +1226,7 @@ def evaluate_deal(
     return (False, "", 0, 0, 0, "no_discount_or_drop")
 
 
-# ================= الجلب المتوازي وتجاوز الحظر (Multi-Threaded Fetcher) =================
+# ================= الجلب المتوازي وتجاوز الحظر =================
 
 def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
     if not text:
@@ -1283,7 +1295,7 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
             if pname == "JinaReader-HTML":
                 h["X-Return-Format"] = "html"
                 h["X-With-Links-Summary"] = "true"
-            r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=16) if HAS_CFFI else requests.get(purl, headers=h, timeout=16)
+            r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=15) if HAS_CFFI else requests.get(purl, headers=h, timeout=15)
             if r.status_code != 200 or not r.text:
                 continue
             if not is_blocked_page(r.text, 200, is_amazon=is_amazon):
@@ -1294,7 +1306,7 @@ def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
     return ""
 
 
-# ================= استخراج المنتجات =================
+# ================= استخراج المنتجات للمتاجر =================
 
 def _strip_installment_nodes(container) -> None:
     for bad_el in container.find_all(class_=re.compile(r"installment|minicash|monthly|tabby|tamara|bnpl|valu", re.I)):
@@ -1363,13 +1375,18 @@ def extract_amazon_items(html_text: str, custom_blocked: Set[str], custom_bigram
         if cur < MIN_PRODUCT_PRICE_GLOBAL or is_phone_accessory(title, cur):
             continue
 
-        card_text = div.get_text(" ", strip=True)
-        # حساب السعر القديم من شارة النسبة المئوية إن لم يظهر السعر المشطوب صراحة
+        card_text = div.get_text(" ", strip=True).translate(_TRANS)
+        # استخراج التقييم بالنجوم إن وُجد لمنع السلع الرديئة
+        rating = 0.0
+        m_rate = re.search(r"([345]\.\d)\s*(?:من\s*5|out\s*of\s*5)", card_text, re.I)
+        if m_rate:
+            rating = safe_float(m_rate.group(1))
+
         if not old:
-            m_pct = re.search(r"[-−]\s*(\d{1,2})\s*%", card_text)
+            m_pct = re.search(r"(?:[-−]\s*(\d{1,2})\s*%|وفر\s*(\d{1,2})\s*%|\bsave\s*(\d{1,2})\s*%)", card_text, re.I)
             if m_pct:
-                pct_val = safe_int(m_pct.group(1))
-                if 8 <= pct_val <= 75:
+                pct_val = safe_int(m_pct.group(1) or m_pct.group(2) or m_pct.group(3))
+                if 10 <= pct_val <= 70:
                     old = int(round(cur / (1.0 - pct_val / 100.0)))
 
         m_coup = _REAL_COUPON_CODE_RE.search(card_text)
@@ -1382,6 +1399,7 @@ def extract_amazon_items(html_text: str, custom_blocked: Set[str], custom_bigram
             "old": old if old > cur else 0,
             "link": f"https://www.amazon.eg/dp/{asin}",
             "coupon": coupon_txt,
+            "rating": rating,
             "hint_cat": hint_cat
         })
     return items
@@ -1443,11 +1461,12 @@ def extract_noon_items(html_text: str, custom_blocked: Set[str], custom_bigrams:
 
                         cur = p_sale if p_sale > 0 else p_reg
                         old = p_was if p_was > cur else (p_reg if (p_sale > 0 and p_reg > p_sale) else 0)
+                        rating = safe_float(node.get("product_rating") or node.get("rating"))
 
                         link = f"https://www.noon.com/egypt-ar/{str(node.get('url') or 'deal').strip('/')}/{sku}/p/"
                         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(name, cur) and link not in seen_links:
                             seen_links.add(link)
-                            items.append({"title": clean_title(name), "price": cur, "old": old, "link": link, "coupon": "", "hint_cat": hint_cat})
+                            items.append({"title": clean_title(name), "price": cur, "old": old, "link": link, "coupon": "", "rating": rating, "hint_cat": hint_cat})
                     for v in node.values():
                         if isinstance(v, (dict, list)):
                             stack.append(v)
@@ -1482,109 +1501,110 @@ def extract_noon_items(html_text: str, custom_blocked: Set[str], custom_bigrams:
         old = parse_price(p_was.get_text(" ", strip=True), custom_blocked, explicit_egp=_element_has_egp(p_was)) if p_was else 0
 
         if not old and cur > 0:
-            card_txt = a.get_text(" ", strip=True)
+            card_txt = a.get_text(" ", strip=True).translate(_TRANS)
             m_pct = re.search(r"(\d{1,2})\s*%\s*(?:خصم|off)", card_txt, re.I)
             if m_pct:
                 pct_v = safe_int(m_pct.group(1))
-                if 10 <= pct_v <= 75:
+                if 10 <= pct_v <= 70:
                     old = int(round(cur / (1.0 - pct_v / 100.0)))
 
         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(title, cur):
             seen_links.add(link)
-            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "hint_cat": hint_cat})
+            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "hint_cat": hint_cat})
     return items
 
 
-def extract_arkhasfeen_items(html_text: str, custom_blocked: Set[str], custom_bigrams: Set[str], hint_cat: str = "") -> List[dict]:
+def extract_jumia_items(html_text: str, custom_blocked: Set[str], custom_bigrams: Set[str], hint_cat: str = "") -> List[dict]:
+    """استخراج عروض جوميا مصر (البقالة، العطور، الملابس، الأجهزة، الفلاش سيل)."""
     items = []
     seen_links = set()
     soup = BeautifulSoup(html_text, "html.parser")
 
-    next_script = soup.find("script", id="__NEXT_DATA__")
-    if next_script and next_script.string:
-        try:
-            root_json = json.loads(next_script.string)
-            stack = [root_json]
-            while stack:
-                node = stack.pop()
-                if isinstance(node, dict):
-                    name = node.get("title") or node.get("name")
-                    price_val = node.get("price") or node.get("best_price") or node.get("lowest_price")
-                    slug = str(node.get("slug") or node.get("id") or "").strip()
-                    curr_val = str(node.get("currency") or "EGP").upper()
+    cards = soup.select("article.prd, div.sku, article.c-prd")
+    for card in cards:
+        a = card.find("a", href=True)
+        if not a or not a["href"].strip():
+            continue
+        link = urllib.parse.urljoin("https://www.jumia.com.eg", a["href"].strip()).split("?")[0]
+        if link in seen_links:
+            continue
 
-                    if isinstance(name, str) and len(name) >= 5 and price_val is not None and curr_val in ("EGP", "LE", "ج.م"):
-                        cur = parse_price(price_val, custom_blocked, explicit_egp=True)
-                        old = parse_price(node.get("old_price") or node.get("regular_price"), custom_blocked, explicit_egp=True)
-                        store_name = str(node.get("store") or node.get("merchant") or node.get("seller") or "متجر محلي")
+        _strip_installment_nodes(card)
 
-                        if slug.startswith("http"):
-                            prod_url = slug
-                        elif slug:
-                            prod_url = f"https://arkhasfeen.com/p/{slug.lstrip('/')}"
-                        else:
-                            prod_url = "https://arkhasfeen.com/deals"
+        name_el = card.select_one("h3.name, div.name, h2.name")
+        title = clean_title(name_el.get_text(" ", strip=True) if name_el else (a.get("title") or ""))
+        if len(title) < 5 or has_installment_or_blocked(title, custom_blocked, custom_bigrams):
+            continue
 
-                        if cur >= MIN_PRODUCT_PRICE_GLOBAL and prod_url not in seen_links and not has_installment_or_blocked(name, custom_blocked, custom_bigrams):
-                            seen_links.add(prod_url)
-                            items.append({
-                                "title": clean_title(name),
-                                "price": cur,
-                                "old": old if old > cur else 0,
-                                "link": prod_url,
-                                "coupon": "",
-                                "seller": store_name,
-                                "hint_cat": hint_cat
-                            })
-                    for v in node.values():
-                        if isinstance(v, (dict, list)):
-                            stack.append(v)
-                elif isinstance(node, list):
-                    for v in node:
-                        if isinstance(v, (dict, list)):
-                            stack.append(v)
-        except Exception:
-            pass
+        prc_el = card.select_one("div.prc, span.prc")
+        old_el = card.select_one("div.old, span.old")
 
-    if not items:
-        cards = soup.find_all(["div", "article", "li"], class_=re.compile(r"product|deal|card|item", re.I))
-        for card in cards:
-            a_tag = card.find("a", href=True)
-            if not a_tag or not a_tag["href"].strip():
-                continue
-            link = urllib.parse.urljoin("https://arkhasfeen.com", a_tag["href"].strip()).split("?")[0]
-            if link in seen_links:
-                continue
+        cur = parse_price(prc_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if prc_el else 0
+        old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if old_el else 0
 
-            _strip_installment_nodes(card)
-            t_el = card.find(["h2", "h3", "h4", "strong"], class_=re.compile(r"title|name|header", re.I)) or a_tag
-            title = clean_title(t_el.get_text(" ", strip=True) if t_el else "")
-            if len(title) < 5 or has_installment_or_blocked(title, custom_blocked, custom_bigrams):
-                continue
+        if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(title, cur):
+            seen_links.add(link)
+            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "hint_cat": hint_cat})
+    return items
 
-            seller_el = card.find(class_=re.compile(r"store|merchant|seller|shop", re.I))
-            seller_name = seller_el.get_text(" ", strip=True) if seller_el else "متجر محلي"
 
-            cur = old = 0
-            sp_el = card.find(class_=re.compile(r"price|current|now|special", re.I))
-            old_el = card.find(class_=re.compile(r"old|was|before|strike", re.I)) or card.find(["del", "s"])
+def extract_arkhasfeen_items(html_text: str, custom_blocked: Set[str], custom_bigrams: Set[str], hint_cat: str = "") -> List[dict]:
+    """استخراج شامل لموقع أرخص فين يدعم Next.js App Router (RSC __next_f) والـ HTML."""
+    items = []
+    seen_links = set()
+    soup = BeautifulSoup(html_text, "html.parser")
 
-            if sp_el:
-                cur = parse_price(sp_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
-            if old_el:
-                old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True)
+    # 1. مسار روابط الـ HTML المباشرة داخل الصفحة
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"].strip()
+        if not any(p in href for p in ("/product/", "/p/", "/item/", "/deal/")):
+            continue
+        link = urllib.parse.urljoin("https://arkhasfeen.com", href).split("?")[0]
+        if link in seen_links:
+            continue
 
-            if cur >= MIN_PRODUCT_PRICE_GLOBAL:
-                seen_links.add(link)
-                items.append({
-                    "title": title,
-                    "price": cur,
-                    "old": old if old > cur else 0,
-                    "link": link,
-                    "coupon": "",
-                    "seller": seller_name,
-                    "hint_cat": hint_cat
-                })
+        card = a_tag.find_parent(["div", "article", "li"]) or a_tag
+        card_txt = card.get_text(" ", strip=True)
+        t_el = card.find(["h2", "h3", "h4", "strong"]) or a_tag
+        title = clean_title(t_el.get_text(" ", strip=True))
+        if len(title) < 5 or has_installment_or_blocked(title, custom_blocked, custom_bigrams):
+            continue
+
+        prices_found = [parse_price(m.group(0), custom_blocked, explicit_egp=True) for m in _CUR_PRICE_RE.finditer(card_txt.translate(_TRANS))]
+        prices_found = [p for p in prices_found if p >= MIN_PRODUCT_PRICE_GLOBAL]
+        if prices_found:
+            cur = min(prices_found)
+            old = max(prices_found) if len(prices_found) > 1 and max(prices_found) > cur else 0
+            seen_links.add(link)
+            items.append({
+                "title": title, "price": cur, "old": old,
+                "link": link, "coupon": "", "seller": "متجر محلي", "rating": 0.0, "hint_cat": hint_cat
+            })
+
+    # 2. مسار قراءة كائنات JSON المدمجة داخل سكربتات Next.js (__next_f أو __NEXT_DATA__)
+    for sc in soup.find_all("script"):
+        sc_txt = sc.string or ""
+        if "price" not in sc_txt and "best_price" not in sc_txt:
+            continue
+        # فك الهروب النصي لـ Next.js RSC
+        unescaped = sc_txt.replace('\\"', '"').replace("\\\\", "\\")
+        for m in re.finditer(r'\{[^{}]*"(?:title|name)"\s*:\s*"([^"]{6,160})"[^{}]*"(?:price|best_price|lowest_price)"\s*:\s*(\d+(?:\.\d+)?)[^{}]*\}', unescaped):
+            name = clean_title(m.group(1))
+            cur = safe_int(m.group(2))
+            if cur >= MIN_PRODUCT_PRICE_GLOBAL and not has_installment_or_blocked(name, custom_blocked, custom_bigrams):
+                obj_slice = m.group(0)
+                m_old = re.search(r'"(?:old_price|regular_price|was_price)"\s*:\s*(\d+(?:\.\d+)?)', obj_slice)
+                old = safe_int(m_old.group(1)) if m_old else 0
+                m_slug = re.search(r'"(?:slug|url|id)"\s*:\s*"([^"]+)"', obj_slice)
+                slug = m_slug.group(1) if m_slug else hashlib.md5(name.encode()).hexdigest()[:10]
+                prod_url = slug if slug.startswith("http") else f"https://arkhasfeen.com/p/{slug.lstrip('/')}"
+                if prod_url not in seen_links:
+                    seen_links.add(prod_url)
+                    items.append({
+                        "title": name, "price": cur, "old": old if old > cur else 0,
+                        "link": prod_url, "coupon": "", "seller": "متجر محلي", "rating": 0.0, "hint_cat": hint_cat
+                    })
+
     return items
 
 
@@ -1635,68 +1655,98 @@ def extract_general_items(html_text: str, base_domain: str, custom_blocked: Set[
 
         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(title, cur):
             seen_links.add(link)
-            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "hint_cat": hint_cat})
+            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "hint_cat": hint_cat})
     return items
 
 
-# ================= مصفوفة الروابط الشاملة لكل الأقسام (Mega-Scale URL Matrix) =================
+# ================= مصفوفة الروابط العملاقة (Hyper-Scale Multi-Page Matrix) =================
 
 def build_dynamic_stores(run_seed: int) -> List[dict]:
-    pages = [1, 2, 3, 4, 5]
-    p1 = pages[run_seed % 5]
-    p2 = pages[(run_seed + 1) % 5]
-    p3 = pages[(run_seed + 2) % 5]
+    pages = [1, 2, 3, 4, 5, 6]
+    p1 = pages[run_seed % 6]
+    p2 = pages[(run_seed + 1) % 6]
+    p3 = pages[(run_seed + 2) % 6]
 
-    # مصفوفة أمازون مصر الضخمة (بقالة، عطور، ساعات، ملابس، عدد يدوية، إلكترونيات، مطبخ)
-    amazon_urls = [
+    # مسح متعدد الصفحات لأمازون مصر لتخطي آلاف السلع
+    amazon_base_queries = [
         # 1. السوبرماركت والبقالة والمنظفات (GROC)
-        (f"https://www.amazon.eg/s?i=grocery&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE", "GROC"),
-        (f"https://www.amazon.eg/s?i=grocery&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE", "GROC"),
-        (f"https://www.amazon.eg/s?k=زيت+ارز+مكرونه+نسكافيه+شاي&i=grocery&page={p2}&language=ar_AE", "GROC"),
-        (f"https://www.amazon.eg/s?k=اريال+برسيل+داوني+فيري+مناديل&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE", "GROC"),
-        # 2. العطور ومستحضرات التجميل والعناية (PERF)
-        (f"https://www.amazon.eg/s?k=perfume+edp+edt+عطر+برفان&i=beauty&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE", "PERF"),
-        (f"https://www.amazon.eg/s?i=beauty&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE", "PERF"),
-        (f"https://www.amazon.eg/s?k=lattafa+armaf+afnan+rasasi+عطر&i=beauty&page={p2}&language=ar_AE", "PERF"),
-        # 3. الساعات الرجالي والحريمي والذكية (WATCH)
-        (f"https://www.amazon.eg/s?k=casio+seiko+citizen+fossil+ساعه+يد&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE", "WATCH"),
-        (f"https://www.amazon.eg/s?i=fashion&bbn=21833215031&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE", "WATCH"),
+        ("https://www.amazon.eg/s?i=grocery&rh=p_n_pct-off-with-tax%3A10-", "GROC"),
+        ("https://www.amazon.eg/s?i=grocery&rh=p_n_deal_type%3A26901098031", "GROC"),
+        ("https://www.amazon.eg/s?k=زيت+سمن+ارز+مكرونه+سكر+دقيق&i=grocery", "GROC"),
+        ("https://www.amazon.eg/s?k=نسكافيه+قهوه+شاي+ليبتون+لبن&i=grocery", "GROC"),
+        ("https://www.amazon.eg/s?k=اريال+برسيل+تايد+داوني+فيري+مناديل&rh=p_n_pct-off-with-tax%3A10-", "GROC"),
+        # 2. العطور والتجميل والعناية الشخصية (PERF)
+        ("https://www.amazon.eg/s?k=perfume+edp+edt+عطر+برفان&i=beauty&rh=p_n_pct-off-with-tax%3A10-", "PERF"),
+        ("https://www.amazon.eg/s?i=beauty&rh=p_n_deal_type%3A26901098031", "PERF"),
+        ("https://www.amazon.eg/s?k=lattafa+armaf+afnan+rasasi+عطر&i=beauty", "PERF"),
+        ("https://www.amazon.eg/s?k=شامبو+شاور+كريم+مزيل+عرق+لوريال+نيفيا&i=beauty&rh=p_n_pct-off-with-tax%3A15-", "PERF"),
+        # 3. الساعات الكلاسيكية والرياضية والذكية (WATCH)
+        ("https://www.amazon.eg/s?k=casio+seiko+citizen+fossil+ساعه+يد&rh=p_n_pct-off-with-tax%3A10-", "WATCH"),
+        ("https://www.amazon.eg/s?i=fashion&bbn=21833215031&rh=p_n_pct-off-with-tax%3A15-", "WATCH"),
+        ("https://www.amazon.eg/s?k=ساعه+رجالي+ساعه+حريمي+smart+watch&rh=p_n_pct-off-with-tax%3A15-", "WATCH"),
         # 4. الملابس والأحذية والشنط (FASH)
-        (f"https://www.amazon.eg/s?i=fashion&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE", "FASH"),
-        (f"https://www.amazon.eg/s?k=adidas+nike+puma+skechers+حذاء+كوتشي&i=fashion&rh=p_n_pct-off-with-tax%3A15-&page={p1}&language=ar_AE", "FASH"),
-        (f"https://www.amazon.eg/s?k=تيشيرت+قميص+بنطلون+جاكيت+رجالي&i=fashion&rh=p_n_pct-off-with-tax%3A20-&page={p2}&language=ar_AE", "FASH"),
-        # 5. العدد اليدوية والكهربائية ومستلزمات السيارات (TOOLS)
-        (f"https://www.amazon.eg/s?i=hi&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE", "TOOLS"),
-        (f"https://www.amazon.eg/s?k=bosch+total+ingco+stanley+شنيور+طقم+عده+مفكات&rh=p_n_pct-off-with-tax%3A10-&page={p1}&language=ar_AE", "TOOLS"),
-        (f"https://www.amazon.eg/s?i=automotive&rh=p_n_pct-off-with-tax%3A15-&page={p2}&language=ar_AE", "TOOLS"),
+        ("https://www.amazon.eg/s?i=fashion&rh=p_n_deal_type%3A26901098031", "FASH"),
+        ("https://www.amazon.eg/s?k=adidas+nike+puma+skechers+حذاء+كوتشي&i=fashion&rh=p_n_pct-off-with-tax%3A15-", "FASH"),
+        ("https://www.amazon.eg/s?k=تيشيرت+قميص+بنطلون+جينز+جاكيت+رجالي&i=fashion&rh=p_n_pct-off-with-tax%3A20-", "FASH"),
+        ("https://www.amazon.eg/s?k=ملابس+حريمي+فستان+بيجامه+شنطه&i=fashion&rh=p_n_pct-off-with-tax%3A20-", "FASH"),
+        # 5. العدد اليدوية والكهربائية والسيارات (TOOLS)
+        ("https://www.amazon.eg/s?i=hi&rh=p_n_pct-off-with-tax%3A10-", "TOOLS"),
+        ("https://www.amazon.eg/s?k=bosch+total+ingco+stanley+شنيور+صاروخ+طقم+عده&rh=p_n_pct-off-with-tax%3A10-", "TOOLS"),
+        ("https://www.amazon.eg/s?i=automotive&rh=p_n_pct-off-with-tax%3A15-", "TOOLS"),
         # 6. الموبايلات واللابتوبات والشاشات والأجهزة المنزلية
-        (f"https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE", "MOB"),
-        (f"https://www.amazon.eg/s?i=electronics&rh=p_n_pct-off-with-tax%3A10-&page={p2}&language=ar_AE", "MOB"),
-        (f"https://www.amazon.eg/s?k=samsung+iphone+xiaomi+realme+oppo&i=electronics&page={p1}&language=ar_AE", "MOB"),
-        (f"https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE", "LAP"),
-        (f"https://www.amazon.eg/s?k=laptop+لابتوب&i=computers&page={p2}&language=ar_AE", "LAP"),
-        (f"https://www.amazon.eg/s?k=tv+smart+شاشه+تلفزيون&i=electronics&page={p1}&language=ar_AE", "TV"),
-        (f"https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031&page={p1}&language=ar_AE", "APPL"),
-        (f"https://www.amazon.eg/s?i=appliances&rh=p_n_pct-off-with-tax%3A10-&page={p2}&language=ar_AE", "APPL"),
-        (f"https://www.amazon.eg/s?k=قلايه+خلاط+ميكروويف+مكنسه+مكواه&i=kitchen&page={p3}&language=ar_AE", "APPL")
+        ("https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031", "MOB"),
+        ("https://www.amazon.eg/s?i=electronics&rh=p_n_pct-off-with-tax%3A10-", "MOB"),
+        ("https://www.amazon.eg/s?k=samsung+iphone+xiaomi+realme+oppo+vivo&i=electronics", "MOB"),
+        ("https://www.amazon.eg/s?i=computers&rh=p_n_deal_type%3A26901098031", "LAP"),
+        ("https://www.amazon.eg/s?k=laptop+لابتوب+شاشه+كمبيوتر&i=computers", "LAP"),
+        ("https://www.amazon.eg/s?k=tv+smart+شاشه+تلفزيون&i=electronics", "TV"),
+        ("https://www.amazon.eg/s?i=kitchen&rh=p_n_deal_type%3A26901098031", "APPL"),
+        ("https://www.amazon.eg/s?i=appliances&rh=p_n_pct-off-with-tax%3A10-", "APPL"),
+        ("https://www.amazon.eg/s?k=قلايه+خلاط+ميكروويف+مكنسه+مكواه+كاتل&i=kitchen", "APPL")
     ]
 
-    # مصفوفة نون مصر الشاملة لكل الأقسام
-    noon_urls = [
-        (f"https://www.noon.com/egypt-ar/grocery/?sort[by]=discount&sort[dir]=desc&page={p1}", "GROC"),
-        (f"https://www.noon.com/egypt-ar/grocery/?sort[by]=popularity&sort[dir]=desc&page={p2}", "GROC"),
-        (f"https://www.noon.com/egypt-ar/beauty-and-health/fragrance/?sort[by]=discount&sort[dir]=desc&page={p1}", "PERF"),
-        (f"https://www.noon.com/egypt-ar/beauty-and-health/?sort[by]=discount&sort[dir]=desc&page={p2}", "PERF"),
-        (f"https://www.noon.com/egypt-ar/watches/?sort[by]=discount&sort[dir]=desc&page={p1}", "WATCH"),
-        (f"https://www.noon.com/egypt-ar/fashion/?sort[by]=discount&sort[dir]=desc&page={p1}", "FASH"),
-        (f"https://www.noon.com/egypt-ar/fashion-men/?sort[by]=discount&sort[dir]=desc&page={p2}", "FASH"),
-        (f"https://www.noon.com/egypt-ar/tools-and-home-improvement/?sort[by]=discount&sort[dir]=desc&page={p1}", "TOOLS"),
-        (f"https://www.noon.com/egypt-ar/electronics-and-mobiles/mobiles-and-accessories/mobiles-20905/?sort[by]=discount&sort[dir]=desc&page={p1}", "MOB"),
-        (f"https://www.noon.com/egypt-ar/electronics-and-mobiles/computers-and-accessories/laptops-16014/?sort[by]=discount&sort[dir]=desc&page={p1}", "LAP"),
-        (f"https://www.noon.com/egypt-ar/electronics-and-mobiles/television-and-video/televisions/?sort[by]=discount&sort[dir]=desc&page={p1}", "TV"),
-        (f"https://www.noon.com/egypt-ar/appliances/?sort[by]=discount&sort[dir]=desc&page={p1}", "APPL"),
-        (f"https://www.noon.com/egypt-ar/home-and-kitchen/?sort[by]=discount&sort[dir]=desc&page={p2}", "APPL"),
-        (f"https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc&page={p1}", "GEN")
+    # توليد صفحتين لكل استعلام في أمازون لمضاعفة الحجم الفعلي
+    amazon_urls = []
+    for base_q, cat_code in amazon_base_queries:
+        amazon_urls.append((f"{base_q}&page={p1}&language=ar_AE", cat_code))
+        amazon_urls.append((f"{base_q}&page={p2}&language=ar_AE", cat_code))
+
+    # توليد صفحتين لكل قسم في نون مصر (50 منتجاً في الصفحة)
+    noon_base_queries = [
+        ("https://www.noon.com/egypt-ar/grocery/?sort[by]=discount&sort[dir]=desc", "GROC"),
+        ("https://www.noon.com/egypt-ar/grocery/?sort[by]=popularity&sort[dir]=desc", "GROC"),
+        ("https://www.noon.com/egypt-ar/beauty-and-health/fragrance/?sort[by]=discount&sort[dir]=desc", "PERF"),
+        ("https://www.noon.com/egypt-ar/beauty-and-health/?sort[by]=discount&sort[dir]=desc", "PERF"),
+        ("https://www.noon.com/egypt-ar/watches/?sort[by]=discount&sort[dir]=desc", "WATCH"),
+        ("https://www.noon.com/egypt-ar/fashion/?sort[by]=discount&sort[dir]=desc", "FASH"),
+        ("https://www.noon.com/egypt-ar/fashion-men/?sort[by]=discount&sort[dir]=desc", "FASH"),
+        ("https://www.noon.com/egypt-ar/fashion-women/?sort[by]=discount&sort[dir]=desc", "FASH"),
+        ("https://www.noon.com/egypt-ar/tools-and-home-improvement/?sort[by]=discount&sort[dir]=desc", "TOOLS"),
+        ("https://www.noon.com/egypt-ar/electronics-and-mobiles/mobiles-and-accessories/mobiles-20905/?sort[by]=discount&sort[dir]=desc", "MOB"),
+        ("https://www.noon.com/egypt-ar/electronics-and-mobiles/computers-and-accessories/laptops-16014/?sort[by]=discount&sort[dir]=desc", "LAP"),
+        ("https://www.noon.com/egypt-ar/electronics-and-mobiles/television-and-video/televisions/?sort[by]=discount&sort[dir]=desc", "TV"),
+        ("https://www.noon.com/egypt-ar/appliances/?sort[by]=discount&sort[dir]=desc", "APPL"),
+        ("https://www.noon.com/egypt-ar/home-and-kitchen/?sort[by]=discount&sort[dir]=desc", "APPL"),
+        ("https://www.noon.com/egypt-ar/electronics/?sort[by]=discount&sort[dir]=desc", "GEN")
+    ]
+
+    noon_urls = []
+    for base_q, cat_code in noon_base_queries:
+        noon_urls.append((f"{base_q}&limit=50&page={p1}", cat_code))
+        noon_urls.append((f"{base_q}&limit=50&page={p2}", cat_code))
+
+    # روابط جوميا مصر لكل الأقسام
+    jumia_urls = [
+        (f"https://www.jumia.com.eg/ar/flash-sales/?page={p1}", "GEN"),
+        (f"https://www.jumia.com.eg/ar/groceries/?sort=highest-discount&page={p1}", "GROC"),
+        (f"https://www.jumia.com.eg/ar/groceries/?sort=popularity&page={p2}", "GROC"),
+        (f"https://www.jumia.com.eg/ar/health-beauty/?sort=highest-discount&page={p1}", "PERF"),
+        (f"https://www.jumia.com.eg/ar/watches-sunglasses/?sort=highest-discount&page={p1}", "WATCH"),
+        (f"https://www.jumia.com.eg/ar/category-fashion-by-jumia/?sort=highest-discount&page={p1}", "FASH"),
+        (f"https://www.jumia.com.eg/ar/home-improvement-tools/?sort=highest-discount&page={p1}", "TOOLS"),
+        (f"https://www.jumia.com.eg/ar/phones-tablets/?sort=highest-discount&page={p1}", "MOB"),
+        (f"https://www.jumia.com.eg/ar/computing/?sort=highest-discount&page={p1}", "LAP"),
+        (f"https://www.jumia.com.eg/ar/home-office-appliances/?sort=highest-discount&page={p1}", "APPL")
     ]
 
     return [
@@ -1709,6 +1759,11 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
             "id": "noon", "name": "نون مصر (Noon)", "domain": "https://www.noon.com",
             "type": "noon", "max_deals": MAX_DEALS_NOON,
             "urls": noon_urls
+        },
+        {
+            "id": "jumia", "name": "جوميا مصر (Jumia)", "domain": "https://www.jumia.com.eg",
+            "type": "jumia", "max_deals": MAX_DEALS_JUMIA,
+            "urls": jumia_urls
         },
         {
             "id": "arkhasfeen", "name": "أرخص فين (35+ متجر محلي)", "domain": "https://arkhasfeen.com",
@@ -1726,9 +1781,11 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
             "type": "general", "max_deals": MAX_DEALS_OTHER,
             "urls": [
                 (f"https://2b.com.eg/ar/deals.html?p={p1}", "GEN"),
-                (f"https://2b.com.eg/ar/computers.html?p={p2}", "LAP"),
+                (f"https://2b.com.eg/ar/deals.html?p={p2}", "GEN"),
+                (f"https://2b.com.eg/ar/computers.html?p={p1}", "LAP"),
                 (f"https://2b.com.eg/ar/mobiles-tablets.html?p={p1}", "MOB"),
-                (f"https://2b.com.eg/ar/home-appliances.html?p={p2}", "APPL"),
+                (f"https://2b.com.eg/ar/mobiles-tablets.html?p={p2}", "MOB"),
+                (f"https://2b.com.eg/ar/home-appliances.html?p={p1}", "APPL"),
                 (f"https://2b.com.eg/ar/tvs.html?p={p1}", "TV")
             ]
         },
@@ -1738,6 +1795,7 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
             "urls": [
                 (f"https://www.raneen.com/ar/deals?p={p1}", "APPL"),
                 (f"https://www.raneen.com/ar/deals?p={p2}", "APPL"),
+                (f"https://www.raneen.com/ar/deals?p={p3}", "APPL"),
                 ("https://www.raneen.com/ar/deals/appliances-electronics-offers", "APPL")
             ]
         },
@@ -1746,7 +1804,8 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
             "type": "general", "max_deals": MAX_DEALS_OTHER,
             "urls": [
                 (f"https://dream2000.com/mobiles.html?p={p1}", "MOB"),
-                (f"https://dream2000.com/home-appliances.html?p={p2}", "APPL"),
+                (f"https://dream2000.com/mobiles.html?p={p2}", "MOB"),
+                (f"https://dream2000.com/home-appliances.html?p={p1}", "APPL"),
                 (f"https://dream2000.com/laptops-and-ipads.html?p={p1}", "LAP")
             ]
         }
@@ -1772,6 +1831,8 @@ def _fetch_and_extract_task(
         ext = extract_amazon_items(html_txt, custom_blocked, custom_bigrams, hint_cat=hint_cat)
     elif stype == "noon":
         ext = extract_noon_items(html_txt, custom_blocked, custom_bigrams, hint_cat=hint_cat)
+    elif stype == "jumia":
+        ext = extract_jumia_items(html_txt, custom_blocked, custom_bigrams, hint_cat=hint_cat)
     elif stype == "arkhasfeen":
         ext = extract_arkhasfeen_items(html_txt, custom_blocked, custom_bigrams, hint_cat=hint_cat)
     else:
@@ -1802,7 +1863,7 @@ def main() -> None:
     t0 = time.time()
     now = int(t0)
     run_seed = int(now // 1800)
-    log(f"🚀 تشغيل محرك الصفقات العملاق متعدد الأقسام والخيوط (V36) - دورة #{run_seed % 10}...")
+    log(f"🚀 تشغيل محرك الصفقات فائق السعة (V37) - دورة #{run_seed % 10}...")
 
     raw_state = load_json(STATE_FILE)
     raw_history = load_json(HISTORY_FILE)
@@ -1840,14 +1901,13 @@ def main() -> None:
         for st in stores
     }
 
-    # تجميع كل المهام وتشغيلها بالتوازي عبر ThreadPoolExecutor
     tasks: List[Tuple[dict, str, str]] = []
     for st in stores:
         for u_entry in st["urls"]:
             url_str, h_cat = u_entry if isinstance(u_entry, tuple) else (u_entry, "GEN")
             tasks.append((st, url_str, h_cat))
 
-    log(f"⚡ جاري فحص {len(tasks)} صفحة أقسام بالتوازي عبر {MAX_WORKERS} مسارات فائقة السرعة...")
+    log(f"⚡ جاري مسح {len(tasks)} صفحة أقسام بالتوازي عبر {MAX_WORKERS} مساراً فائق السرعة...")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(_fetch_and_extract_task, t, custom_blocked, custom_bigrams) for t in tasks]
@@ -1928,7 +1988,8 @@ def main() -> None:
                 has_coupon=bool(it.get("coupon")),
                 brand_liked=bool(liked_brands.get(it["brand"], 0) > 0),
                 cat_bonus=cat_affinity.get(item_cat, 0),
-                store_disc_mod=store_disc_mod
+                store_disc_mod=store_disc_mod,
+                rating=safe_float(it.get("rating"))
             )
 
             if not is_deal:
@@ -1959,7 +2020,6 @@ def main() -> None:
             f"| مقارن={diag['cross_matched']} | مقبول={diag['accepted']} | أسباب الاستبعاد=({top_reasons})"
         )
 
-        # تنويع ذكي للأقسام داخل نفس المتجر حتى لا تطغى فئة واحدة على كل الرسائل
         verified_candidates.sort(
             key=lambda x: (
                 "قيد التوثيق" not in x["deal_type"],
@@ -1970,9 +2030,10 @@ def main() -> None:
             reverse=True
         )
 
+        # تنويع متوازن للأقسام داخل نفس المتجر (Round-Robin Category Quota)
         selected_for_store: List[dict] = []
         cat_bucket_counts: Counter = Counter()
-        max_per_cat_in_store = max(4, max_deals // 2)
+        max_per_cat_in_store = max(3, max_deals // 3)
 
         for cand in verified_candidates:
             c_cat = cand.get("category", "GEN")
@@ -2017,6 +2078,7 @@ def main() -> None:
                 f"📊 أقل سعر مسجل ({obs_d} يوم رصد في آخر 30 يوماً): {it['min_30d']:,} ج.م\n"
                 if it.get("min_30d") and obs_d > 0 else ""
             )
+            rate_line = f"⭐ تقييم المنتج: <b>{it['rating']}/5</b>\n" if it.get("rating", 0) >= 3.5 else ""
             coupon_line = f"🎟 <b>كود خصم إضافي: {htmllib.escape(it['coupon'])}</b>\n" if it.get("coupon") else ""
             msg = (
                 f"{tag}\n"
@@ -2025,6 +2087,7 @@ def main() -> None:
                 f"💰 السعر النقدي الآن: <b>{it['price']:,} ج.م</b>\n"
                 f"{ref_txt}\n"
                 f"{hist_line}"
+                f"{rate_line}"
                 f"{coupon_line}"
                 f"🛡 مؤشر ثقة الصفقة: <b>{conf}/100</b>\n"
                 f"🔗 {it['link']}"
@@ -2051,9 +2114,9 @@ def main() -> None:
 
         diag["sent"] = sent_store
 
-    if len(history) > 25000:
+    if len(history) > 35000:
         sorted_h = sorted(history.items(), key=lambda kv: safe_int(kv[1].get("ts") if isinstance(kv[1], dict) else 0))
-        history = dict(sorted_h[-25000:])
+        history = dict(sorted_h[-35000:])
 
     save_json(STATE_FILE, state)
     save_json(HISTORY_FILE, history)
@@ -2061,10 +2124,11 @@ def main() -> None:
     git_ok = commit_state(state, history, rules)
 
     elapsed = (time.time() - t0) / 60.0
+    total_raw_scanned = sum(d["raw"] for d in store_diag.values())
     total_unique_scanned = sum(d["unique"] for d in store_diag.values())
     summary_lines = [
-        "📊 <b>ملخص جولة محرك الصفقات العملاق (V36)</b>",
-        f"🔎 إجمالي السلع الفريدة المفحوصة: <b>{total_unique_scanned:,} منتج</b>",
+        "📊 <b>ملخص جولة محرك الصفقات العملاق (V37)</b>",
+        f"🔎 إجمالي السلع المفحوصة: <b>{total_raw_scanned:,} إجمالي ({total_unique_scanned:,} سلعة فريدة)</b>",
         ""
     ]
     for st in stores:
