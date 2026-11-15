@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار الصفقات المصري الاحترافي — V37 (Hyper-Scale 3500+ Items & True-Deal Shield)
-=================================================================================
-التطويرات الجذرية في V37:
-1. محرك فحص فائق السعة (12 مساراً متوازياً + المسح المزدوج للصفحات Multi-Page Sweep) لتخطي 2500-4000 منتج.
-2. إضافة متجر جوميا مصر (Jumia Egypt Flash Sales & Grocery/Fashion/Tools) لزيادة التغطية والمقارنة.
-3. إصلاح جذري لاستخراج "أرخص فين" عبر قراءة بيانات React Server Components (__next_f) والـ HTML الخام.
-4. درع الصفقات الحقيقية (True-Deal Shield):
-   - فلتر جودة التقييمات (استبعاد المنتجات ذات التقييم المنخفض < 3.4 نجوم).
-   - حارس التضخم الكاذب (كشف الأسعار المشطوبة المبالغ فيها وقصها رياضياً قبل التقييم).
-5. دعم استخراج عروض السوبرماركت والبقالة والعطور والساعات من شارات الخصم المئوية والنصية.
-6. التعلم الذاتي 4.0 مع حفظ مستمر للذاكرة وتوزيع متوازن للأقسام.
+رادار الصفقات المصري الاحترافي — V38 (Fuzzy Cross-Matcher & Autonomous Learning 5.0)
+====================================================================================
+المعمارية الهندسية في V38:
+1. مطابقة ذكية بنظام عدم التعارض (Two-Tier Non-Conflict Spec Matcher) + تعريب رموز الموديلات.
+2. منظم سرعة لكل متجر (Per-Domain Semaphore) لمنع الحظر أثناء الفحص المتوازي (12 Workers).
+3. التعلم الذاتي الصامت 5.0 (Autonomous Market Learning): يكافئ الصفقات التي يرتفع سعرها لاحقاً تلقائياً.
+4. درع التقييمات الشامل (1.0-5.0 نجوم + عدد المقيمين >= 10) لمنع المنتجات الرديئة والوهمية.
+5. كشف صفقات نفس الموديل داخل المتجر حتى لو كان السعر المشطوب (old = 0).
+6. فحص العملة في العنصر والأب والجد لاستخراج 100% من أسعار جوميا و2B وأرخص فين.
+7. حماية كاملة للذاكرة عبر try/finally وتأمين روابط HTML.
 """
 
 from __future__ import annotations
@@ -27,13 +26,14 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.parse
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-print("⚡ بدء تشغيل محرك الصفقات فائق السعة مع درع الصفقات الحقيقية (الإصدار V37)...", flush=True)
+print("⚡ بدء تشغيل محرك الصفقات الذكي V38 (Fuzzy Matcher & Autonomous Learning 5.0)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -86,6 +86,9 @@ UA_LIST = [
 ]
 AR_LANG = "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
 
+# منظم السرعة لكل متجر لمنع الحظر أثناء التشغيل المتوازي (بحد أقصى 3 طلبات متزامنة لكل متجر)
+_DOMAIN_SEMAPHORES: Dict[str, threading.Semaphore] = defaultdict(lambda: threading.Semaphore(3))
+
 _AR_DIGITS = "".join(chr(0x0660 + i) for i in range(10)) + "".join(chr(0x06F0 + i) for i in range(10)) + "\u066b\u066c\u060c"
 _TRANS = str.maketrans(_AR_DIGITS, "0123456789" * 2 + ".,,")
 _AR_NORM_MAP = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ة": "ه", "ى": "ي", "ؤ": "و", "ئ": "ي", "ـ": ""})
@@ -130,6 +133,15 @@ def extract_bigrams(text: str) -> Set[str]:
     return {f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)}
 
 
+def sanitize_url(url: str) -> str:
+    if not url:
+        return ""
+    u = url.strip()
+    if not u.startswith(("http://", "https://")):
+        return ""
+    return htmllib.escape(u, quote=True)
+
+
 BASE_INSTALLMENT_WORDS = tuple(normalize_text(w) for w in (
     "قسط", "شهري", "شهريا", "شهرياً", "ميني كاش", "minicash", "/شهر", "per month",
     "تقسيط", "أقساط", "اقساط", "installment", "/mo", "بدون فوائد", "دفعة مقدمة", "تمويل"
@@ -158,7 +170,7 @@ PROTECTED_WORDS_NORM: Set[str] = {normalize_text(w) for w in (
     "skechers", "سكيتشرز", "defacto", "ديفاكتو", "lc waikiki", "وايكيكي",
     "lattafa", "لطافه", "armaf", "ارماف", "afnan", "افنان", "rasasi", "رصاصي",
     "sauvage", "سوفاج", "dior", "ديور", "chanel", "شانيل", "versace", "فرزاتشي",
-    "bosch", "بوش", "makita", "ماكيتا", "dewalt", "ديوالت", "stanلي", "stanley",
+    "bosch", "بوش", "makita", "ماكيتا", "dewalt", "ديوالت", "stanley", "ستانلي",
     "total", "توتال", "ingco", "انجكو", "apt", "crown", "كراون",
     "nescafe", "نسكافيه", "lipton", "ليبتون", "ariel", "اريال", "persil", "برسيل",
     "tide", "تايد", "downy", "داوني", "fairy", "فيري", "crystal", "كريستال",
@@ -199,6 +211,7 @@ def sanitize_state(raw_state: Any) -> dict:
                 "store": str(v.get("store") or ""),
                 "link": str(v.get("link") or ""),
                 "message_id": safe_int(v.get("message_id")),
+                "auto_rewarded": bool(v.get("auto_rewarded", False)),
                 "rated_by": [str(u) for u in (v.get("rated_by") or []) if isinstance(u, (str, int))]
             }
     return clean
@@ -247,6 +260,7 @@ def sanitize_rules(raw_rules: Any) -> dict:
         "stats": {
             "total_positive": safe_int(raw_rules.get("stats", {}).get("total_positive")),
             "total_negative": safe_int(raw_rules.get("stats", {}).get("total_negative")),
+            "auto_verified_wins": safe_int(raw_rules.get("stats", {}).get("auto_verified_wins")),
             "last_decay_ts": safe_int(raw_rules.get("stats", {}).get("last_decay_ts"))
         }
     }
@@ -323,7 +337,7 @@ def commit_state(state: dict, history: dict, rules: dict) -> bool:
             return True
 
         c_res = subprocess.run(
-            ["git", "commit", "-m", "chore: update radar intelligence memory V37", "--only", "--"] + target_files,
+            ["git", "commit", "-m", "chore: update radar intelligence memory V38", "--only", "--"] + target_files,
             capture_output=True, text=True, check=False
         )
         if c_res.returncode != 0:
@@ -348,7 +362,7 @@ def commit_state(state: dict, history: dict, rules: dict) -> bool:
         return False
 
 
-# ================= تليجرام ومحرك التعلم والتطوير الذاتي 4.0 =================
+# ================= تليجرام ومحرك التعلم والتطوير الذاتي 5.0 =================
 
 def _tg_post(endpoint: str, payload: dict) -> Optional[dict]:
     if not BOT_TOKEN:
@@ -570,7 +584,7 @@ def process_telegram_feedback(rules: dict, state: dict, now: int) -> None:
                         if bigram_strikes[bg] >= 2 and bg not in blocked_bigrams:
                             blocked_bigrams.append(bg)
 
-                log(f"🧠 تعلم ذاتي 4.0: حظر العرض [{title[:30]}] وتحديث فلتر العبارات والمتجر [{canonical_store}].")
+                log(f"🧠 تعلم ذاتي 5.0: حظر العرض [{title[:30]}] وتحديث فلتر العبارات والمتجر [{canonical_store}].")
                 if cb_id:
                     _tg_post("answerCallbackQuery", {
                         "callback_query_id": cb_id,
@@ -699,7 +713,7 @@ def clean_title(t: str) -> str:
     return re.sub(r"^[-\u2212\u2013]?\s*\d{1,2}\s?%\s*", "", t)[:190]
 
 
-# ================= الهوية ومصنف الأقسام الشامل (All-Categories Identity) =================
+# ================= الهوية والمطابقة الذكية بنظام عدم التعارض (Fuzzy Non-Conflict Matcher) =================
 
 _BRAND_ALIASES = {
     "سامسونج": "samsung", "ابل": "apple", "ايفون": "apple", "ايباد": "apple",
@@ -725,6 +739,11 @@ _BRAND_ALIASES = {
     "تايد": "tide", "داوني": "downy", "فيري": "fairy", "كريستال": "crystal",
     "جهينه": "juhayna", "المراعي": "almarai", "نستله": "nestle", "احمد تي": "ahmadtea",
     "الضحى": "eldoha", "عافيه": "afia", "سلايت": "slite", "كنور": "knorr"
+}
+
+_AR_MODEL_LETTERS = {
+    "ايه": "a", "اي": "a", "اس": "s", "ام": "m", "اف": "f",
+    "سي": "c", "جي": "g", "اكس": "x", "في": "v", "زد": "z"
 }
 
 _TIER_WORDS = {"pro", "max", "ultra", "plus", "lite", "fe", "mini", "se", "fold", "flip", "air", "note", "4g", "5g"}
@@ -859,6 +878,10 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
         norm_ar_t = normalize_text(ar_t)
         t = re.sub(r"(?<!\w)" + re.escape(norm_ar_t) + r"(?!\w)", f" {en_t} ", t)
 
+    # تحويل الحروف التقنية المكتوبة بالعربية (مثل: ايه 55 -> a55)
+    for ar_let, en_let in _AR_MODEL_LETTERS.items():
+        t = re.sub(r"(?<!\w)" + re.escape(ar_let) + r"\s*(\d{1,3})\b", f" {en_let}\\1 ", t)
+
     t = re.sub(r"الجيل\s+الخامس", " 5g ", t)
     t = re.sub(r"الجيل\s+الرابع", " 4g ", t)
     t = re.sub(r"بوصه|بوصة|انش|inches|\"|''", " inch ", t)
@@ -966,25 +989,16 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
     gpu_sorted = sorted(set(gpu_tokens))
     tiers_sorted = sorted(tiers_set)
 
-    spec_parts = []
-    if ram_vals:
-        spec_parts.append("R:" + "-".join(ram_vals))
-    if storage_vals:
-        spec_parts.append("S:" + "-".join(storage_vals))
-    if vol_weight_specs:
-        spec_parts.append("VW:" + "-".join(vol_weight_specs))
-    if inch_vals:
-        spec_parts.append("I:" + "-".join(inch_vals))
-    if cpu_sorted:
-        spec_parts.append("CPU:" + "-".join(cpu_sorted))
-    if gpu_sorted:
-        spec_parts.append("GPU:" + "-".join(gpu_sorted))
-    if tv_tech:
-        spec_parts.append("TECH:" + "-".join(tv_tech))
-    if tiers_sorted:
-        spec_parts.append("T:" + "-".join(tiers_sorted))
-
-    spec_str = "|".join(spec_parts)
+    # قاموس المواصفات لاستخدامه في فحص عدم التعارض (Non-Conflict Spec Matching)
+    specs_dict = {
+        "ram": ram_vals[0] if ram_vals else "",
+        "storage": storage_vals[0] if storage_vals else "",
+        "cpu": cpu_sorted[0] if cpu_sorted else "",
+        "gpu": gpu_sorted[0] if gpu_sorted else "",
+        "inch": inch_vals[0] if inch_vals else "",
+        "vw": vol_weight_specs[0] if vol_weight_specs else "",
+        "tiers": "-".join(t for t in tiers_sorted if t in ("pro", "max", "ultra", "plus", "fe", "lite", "mini"))
+    }
 
     has_exact_id = bool(
         brand and (
@@ -995,29 +1009,79 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
     )
     if has_exact_id:
         model_tag = "-".join(models) if models else "-".join(core_sorted[:3])
-        sig = f"{cat}|{brand}|M:{model_tag}|{spec_str}"
+        # مفتاح أساسي مرن يجمع نفس الموديل من كل المتاجر، ثم تفصل دالة specs_are_compatible أي اختلاف في المواصفات
+        core_match_key = f"{cat}|{brand}|{model_tag}|{specs_dict['tiers']}"
+        return {
+            "sig": f"{core_match_key}|{specs_dict['ram']}|{specs_dict['storage']}",
+            "core_match_key": core_match_key,
+            "specs": specs_dict,
+            "exact_model": True,
+            "brand": brand,
+            "category": cat
+        }
 
-        if cat == "LAP":
-            cross_match_key = f"LAP|{brand}|{model_tag}|{cpu_sorted[0] if cpu_sorted else ''}|{gpu_sorted[0] if gpu_sorted else ''}|{ram_vals[0] if ram_vals else ''}|{storage_vals[0] if storage_vals else ''}"
-        elif cat == "MOB":
-            net_tier = "5g" if "5g" in tiers_sorted else ("4g" if "4g" in tiers_sorted else "")
-            cross_match_key = f"MOB|{brand}|{model_tag}|{ram_vals[0] if ram_vals else ''}|{storage_vals[0] if storage_vals else ''}|{net_tier}"
-        elif cat == "TV":
-            cross_match_key = f"TV|{brand}|{model_tag}|{inch_vals[0] if inch_vals else ''}|{tv_tech[0] if tv_tech else ''}"
-        elif cat in ("PERF", "GROC"):
-            cross_match_key = f"{cat}|{brand}|{model_tag}|{vol_weight_specs[0] if vol_weight_specs else ''}"
-        else:
-            cross_match_key = f"{cat}|{brand}|{model_tag}|{storage_vals[0] if storage_vals else ''}"
-
-        return {"sig": sig, "cross_match_key": cross_match_key, "exact_model": True, "brand": brand, "category": cat}
-
-    sig = f"{cat}|{brand}|W:{'-'.join(core_sorted)}|{spec_str}"
-    return {"sig": sig, "cross_match_key": "", "exact_model": False, "brand": brand, "category": cat}
+    return {
+        "sig": f"{cat}|{brand}|W:{'-'.join(core_sorted)}",
+        "core_match_key": "",
+        "specs": specs_dict,
+        "exact_model": False,
+        "brand": brand,
+        "category": cat
+    }
 
 
-# ================= سجل الأسعار 2.0 =================
+def specs_are_compatible(s1: Dict[str, str], s2: Dict[str, str], cat: str) -> bool:
+    """
+    فحص التوافق بدون تعارض:
+    - إذا كانت السعة التخزينية أو الشاشة موجودة في الاثنين ومختلفة -> غير متوافقين.
+    - إذا كان الرام مكتوباً في متجر واحد فقط (والآخر فارغ) مع تطابق السعة والموديل -> متوافقان!
+    """
+    for vital_key in ("storage", "inch", "vw", "cpu", "gpu"):
+        v1, v2 = s1.get(vital_key, ""), s2.get(vital_key, "")
+        if v1 and v2 and v1 != v2:
+            return False
+        # في اللابتوب والهواتف، لابد أن تتطابق سعة التخزين صراحةً إن وجدت في أحدهما
+        if cat in ("MOB", "LAP") and vital_key == "storage" and (v1 != v2):
+            return False
 
-def record_and_analyze_history(history: dict, clean_link: str, cur_price: int, now: int) -> Dict[str, Any]:
+    # الرام: إذا ذُكر في المتجرين معاً يجب أن يتطابق، أما إذا أغفله أحدهما فيُسمح بالمطابقة
+    r1, r2 = s1.get("ram", ""), s2.get("ram", "")
+    if r1 and r2 and r1 != r2:
+        return False
+
+    return True
+
+
+# ================= سجل الأسعار والتعلم التلقائي الصامت =================
+
+def record_and_analyze_history(
+    history: dict,
+    state: dict,
+    rules: dict,
+    deal_hash: str,
+    clean_link: str,
+    cur_price: int,
+    now: int
+) -> Dict[str, Any]:
+    # التعلم التلقائي الصامت (Autonomous Learning):
+    # إذا كنا قد أرسلنا هذا المنتج سابقاً بسعر منخفض، ثم رصدنا ارتفاع سعره الآن بنسبة >= 8%، نكافئ القسم والماركة والمتجر تلقائياً!
+    prev_sent = state.get(deal_hash)
+    if isinstance(prev_sent, dict) and not prev_sent.get("auto_rewarded"):
+        sent_price = safe_int(prev_sent.get("price"))
+        if sent_price > 0 and cur_price >= sent_price * 1.08:
+            prev_sent["auto_rewarded"] = True
+            b_name = prev_sent.get("brand", "")
+            c_name = prev_sent.get("category", "")
+            st_canon = get_canonical_store_id(prev_sent.get("store", ""))
+            if b_name:
+                rules.setdefault("liked_brands", {})[b_name] = rules.get("liked_brands", {}).get(b_name, 0) + 1
+            if c_name:
+                rules.setdefault("category_affinity", {})[c_name] = min(10, rules.get("category_affinity", {}).get(c_name, 0) + 1)
+            if st_canon:
+                rules.setdefault("store_discount_modifiers", {})[st_canon] = max(-4, rules.get("store_discount_modifiers", {}).get(st_canon, 0) - 1)
+            rules.setdefault("stats", {})["auto_verified_wins"] = safe_int(rules.get("stats", {}).get("auto_verified_wins")) + 1
+            log(f"🎯 تعلم ذاتي صامت: ارتفع سعر [{prev_sent.get('title', '')[:30]}] من {sent_price} إلى {cur_price} ج.م — تأكد نجاح الصفقة السابقة!")
+
     rec = history.get(clean_link)
     daily_buckets: Dict[int, Tuple[int, int]] = {}
 
@@ -1092,30 +1156,33 @@ def evaluate_deal(
     cur: int,
     old: int,
     cat: str,
+    brand: str,
     h_stats: Dict[str, Any],
     market_lowest_other: int,
+    same_store_higher: int,
     exact_model: bool,
     has_coupon: bool = False,
     brand_liked: bool = False,
     cat_bonus: int = 0,
     store_disc_mod: int = 0,
-    rating: float = 0.0
+    rating: float = 0.0,
+    reviews: int = 0
 ) -> Tuple[bool, str, int, int, int, str]:
-    # درع التقييمات: استبعاد السلع ذات التقييم السيئ (< 3.4 من 5) لمنع المنتجات الرديئة
+    # 1. فلتر التقييمات الشامل (يلتقط من 1.0 إلى 3.3 ويرفضها فوراً)
     if 0.1 <= rating < 3.4:
         return (False, "", 0, 0, 0, "low_product_rating")
 
     if cat == "GROC":
         min_price_cat = 35
-        min_saving_unverified = 20
-        base_unverified_disc = 14
+        min_saving_unverified = 18
+        base_unverified_disc = 13
     elif cat in ("PERF", "FASH", "TOOLS", "WATCH"):
-        min_price_cat = 75
-        min_saving_unverified = 45
-        base_unverified_disc = 15
+        min_price_cat = 70
+        min_saving_unverified = 40
+        base_unverified_disc = 14
     else:
         min_price_cat = 95
-        min_saving_unverified = 110
+        min_saving_unverified = 100
         base_unverified_disc = MIN_UNVERIFIED_DISCOUNT
 
     if cur < min_price_cat:
@@ -1137,7 +1204,8 @@ def evaluate_deal(
     if competitor_is_much_cheaper:
         return (False, "", 0, 0, 0, "much_cheaper_competitor_exists")
 
-    rating_bonus = 3 if rating >= 4.3 else (1 if rating >= 4.0 else 0)
+    # لا يُمنح بونص التقييم إلا إذا كان عدد المقيمين >= 10 لمنع التقييمات الوهمية الفردية
+    rating_bonus = 4 if (rating >= 4.3 and reviews >= 10) else (2 if (rating >= 4.0 and reviews >= 5) else 0)
     c_extra = (3 if brand_liked else 0) + min(4, max(-3, cat_bonus)) + rating_bonus
     hist_weights = {"strong": 34, "medium": 30, "weak": 22, "none": 10}
 
@@ -1174,17 +1242,18 @@ def evaluate_deal(
                 label = "هبوط تاريخي بالمتجر (يتوفر منافس قريب)" if competitor_is_slightly_cheaper else "هبوط سعر صامت موثق"
                 return (True, label, median_30d, drop_pct, total_conf, "ok")
 
-    # 3. المسار الثالث (الخصم المعلن مع درع مكافحة الأسعار الوهمية المنتفخة)
-    if old > cur:
-        # إذا كان السعر الحالي أعلى من وسيط الـ 30 يوماً، فهذا خصم وهمي تماماً
+    # تعويض غياب السعر المشطوب إذا وُجد بائع آخر في نفس المتجر يبيع نفس الموديل بسعر أعلى
+    effective_old = old if old > cur else (same_store_higher if same_store_higher >= cur * 1.10 else 0)
+
+    # 3. المسار الثالث (الخصم المعلن مع درع مكافحة التضخم الكاذب)
+    if effective_old > cur:
         if median_30d > 0 and cur > median_30d * 1.03 and not has_market_deal_proof:
             return (False, "", 0, 0, 0, "fake_inflated_old_price")
 
         if competitor_is_slightly_cheaper:
             return (False, "", 0, 0, 0, "not_cheaper_than_competitor")
 
-        effective_old = old
-        if median_30d > 0 and old > median_30d * 1.22:
+        if median_30d > 0 and effective_old > median_30d * 1.22:
             effective_old = int(median_30d * 1.08)
 
         if effective_old > cur:
@@ -1193,8 +1262,8 @@ def evaluate_deal(
             if disc > MAX_REALISTIC_DISC:
                 return (False, "", 0, 0, 0, "unrealistic_discount_pct")
 
-            # رفض الخصومات غير الموثقة المبالغ فيها (> 52%) للأجهزة بدون ماركة معروفة لأنها غالباً وهمية
-            if not has_history_proof and not has_market_deal_proof and disc > 52 and not exact_model:
+            # حظر الخصومات غير الموثقة العالية (> 42%) إذا كانت لسلعة مجهولة بلا ماركة وبلا تقييمات موثوقة
+            if not has_history_proof and not has_market_deal_proof and disc > 42 and not brand and reviews < 5:
                 return (False, "", 0, 0, 0, "suspicious_unverified_high_disc")
 
             if strength in ("strong", "medium") or has_market_deal_proof:
@@ -1212,12 +1281,12 @@ def evaluate_deal(
                     (has_coupon and disc >= 8)
                     or (cur >= 1800 and (disc >= 9 or saving >= 220))
                     or (disc >= effective_unverified_disc and saving >= min_saving_unverified)
-                    or (cat in ("GROC", "PERF", "FASH", "TOOLS", "WATCH") and disc >= 16 and saving >= 20)
+                    or (cat in ("GROC", "PERF", "FASH", "TOOLS", "WATCH") and disc >= 15 and saving >= 18)
                 )
                 if is_good_unverified:
                     c_base = 35
                     c_match = 16 if exact_model else 12
-                    c_auth = min(20, 10 + disc // 3)
+                    c_auth = min(19, 10 + disc // 4)
                     total_conf = min(76, c_base + c_match + c_auth + c_extra)
                     if total_conf >= MIN_CONF_UNVERIFIED:
                         return (True, "خصم معلن غير مؤكد (قيد التوثيق)", effective_old, disc, total_conf, "ok")
@@ -1226,7 +1295,7 @@ def evaluate_deal(
     return (False, "", 0, 0, 0, "no_discount_or_drop")
 
 
-# ================= الجلب المتوازي وتجاوز الحظر =================
+# ================= الجلب المتوازي مع منظم السرعة لكل متجر =================
 
 def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
     if not text:
@@ -1251,59 +1320,62 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
     return any(b in title for b in ("just a moment", "attention required", "access denied", "403 forbidden", "security checkpoint", "robot check", "one more step", "sorry! something went wrong"))
 
 
-def smart_fetch(url: str, store_name: str, is_amazon: bool = False) -> str:
-    base_headers = {
-        "Accept-Language": AR_LANG,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Referer": "https://www.google.com.eg/",
-        "Upgrade-Insecure-Requests": "1",
-        "User-Agent": random.choice(UA_LIST)
-    }
-    if is_amazon:
-        base_headers["Cookie"] = "i18n-prefs=EGP; lc-acbamo=ar_AE"
+def smart_fetch(url: str, store_id: str, is_amazon: bool = False) -> str:
+    sem = _DOMAIN_SEMAPHORES[store_id]
+    with sem:
+        time.sleep(random.uniform(0.25, 0.65))
+        base_headers = {
+            "Accept-Language": AR_LANG,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Referer": "https://www.google.com.eg/",
+            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": random.choice(UA_LIST)
+        }
+        if is_amazon:
+            base_headers["Cookie"] = "i18n-prefs=EGP; lc-acbamo=ar_AE"
 
-    if HAS_CFFI:
-        fps = ["safari17_0", "chrome120", "chrome116", "edge101"]
-        random.shuffle(fps)
-        for fp in fps[:3]:
+        if HAS_CFFI:
+            fps = ["safari17_0", "chrome120", "chrome116", "edge101"]
+            random.shuffle(fps)
+            for fp in fps[:3]:
+                try:
+                    sess = cffi_requests.Session(impersonate=fp)
+                    r = sess.get(url, headers=base_headers, timeout=11)
+                    if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
+                        return r.text
+                except Exception:
+                    pass
+
+        if HAS_CLOUDSCRAPER:
             try:
-                sess = cffi_requests.Session(impersonate=fp)
-                r = sess.get(url, headers=base_headers, timeout=11)
+                local_scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+                r = local_scraper.get(url, headers=base_headers, timeout=11)
                 if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
                     return r.text
             except Exception:
                 pass
 
-    if HAS_CLOUDSCRAPER:
-        try:
-            local_scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-            r = local_scraper.get(url, headers=base_headers, timeout=11)
-            if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
-                return r.text
-        except Exception:
-            pass
-
-    enc = urllib.parse.quote(url, safe="")
-    proxies = [
-        ("CodeTabs", f"https://api.codetabs.com/v1/proxy?quest={enc}"),
-        ("AllOrigins-Raw", f"https://api.allorigins.win/raw?url={enc}"),
-        ("JinaReader-HTML", f"https://r.jina.ai/{url}")
-    ]
-    for pname, purl in proxies:
-        try:
-            h = {"User-Agent": random.choice(UA_LIST), "Accept-Language": AR_LANG}
-            if pname == "JinaReader-HTML":
-                h["X-Return-Format"] = "html"
-                h["X-With-Links-Summary"] = "true"
-            r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=15) if HAS_CFFI else requests.get(purl, headers=h, timeout=15)
-            if r.status_code != 200 or not r.text:
+        enc = urllib.parse.quote(url, safe="")
+        proxies = [
+            ("CodeTabs", f"https://api.codetabs.com/v1/proxy?quest={enc}"),
+            ("AllOrigins-Raw", f"https://api.allorigins.win/raw?url={enc}"),
+            ("JinaReader-HTML", f"https://r.jina.ai/{url}")
+        ]
+        for pname, purl in proxies:
+            try:
+                h = {"User-Agent": random.choice(UA_LIST), "Accept-Language": AR_LANG}
+                if pname == "JinaReader-HTML":
+                    h["X-Return-Format"] = "html"
+                    h["X-With-Links-Summary"] = "true"
+                r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=15) if HAS_CFFI else requests.get(purl, headers=h, timeout=15)
+                if r.status_code != 200 or not r.text:
+                    continue
+                if not is_blocked_page(r.text, 200, is_amazon=is_amazon):
+                    return r.text
+            except Exception:
                 continue
-            if not is_blocked_page(r.text, 200, is_amazon=is_amazon):
-                return r.text
-        except Exception:
-            continue
 
-    return ""
+        return ""
 
 
 # ================= استخراج المنتجات للمتاجر =================
@@ -1319,16 +1391,13 @@ def _strip_installment_nodes(container) -> None:
 
 
 def _element_has_egp(price_el) -> bool:
+    """فحص وجود رمز العملة في العنصر نفسه أو الأب المباشر أو الجد."""
     if price_el is None:
         return False
-    txt = price_el.get_text(" ", strip=True)
-    if _EGP_TOKEN_RE.search(txt):
-        return True
-    if price_el.parent:
-        for sib in price_el.parent.find_all(["span", "sup", "small", "bdi"], recursive=False):
-            sib_cls = " ".join(sib.get("class") or []).lower()
-            sib_txt = sib.get_text(" ", strip=True)
-            if ("symbol" in sib_cls or "curr" in sib_cls or len(sib_txt) <= 8) and _EGP_TOKEN_RE.search(sib_txt):
+    for node in (price_el, price_el.parent, price_el.parent.parent if price_el.parent else None):
+        if node is not None:
+            txt = node.get_text(" ", strip=True)
+            if len(txt) <= 120 and _EGP_TOKEN_RE.search(txt):
                 return True
     return False
 
@@ -1376,11 +1445,15 @@ def extract_amazon_items(html_text: str, custom_blocked: Set[str], custom_bigram
             continue
 
         card_text = div.get_text(" ", strip=True).translate(_TRANS)
-        # استخراج التقييم بالنجوم إن وُجد لمنع السلع الرديئة
+        # التقاط التقييم من 1.0 إلى 5.0 وعدد المقيمين
         rating = 0.0
-        m_rate = re.search(r"([345]\.\d)\s*(?:من\s*5|out\s*of\s*5)", card_text, re.I)
+        reviews = 0
+        m_rate = re.search(r"([1-5](?:\.\d)?)\s*(?:من\s*5|out\s*of\s*5)", card_text, re.I)
         if m_rate:
             rating = safe_float(m_rate.group(1))
+        m_rev = re.search(r"\((\d{1,3}(?:,\d{3})*|\d+)\)", card_text)
+        if m_rev:
+            reviews = safe_int(m_rev.group(1).replace(",", ""))
 
         if not old:
             m_pct = re.search(r"(?:[-−]\s*(\d{1,2})\s*%|وفر\s*(\d{1,2})\s*%|\bsave\s*(\d{1,2})\s*%)", card_text, re.I)
@@ -1400,6 +1473,7 @@ def extract_amazon_items(html_text: str, custom_blocked: Set[str], custom_bigram
             "link": f"https://www.amazon.eg/dp/{asin}",
             "coupon": coupon_txt,
             "rating": rating,
+            "reviews": reviews,
             "hint_cat": hint_cat
         })
     return items
@@ -1462,11 +1536,12 @@ def extract_noon_items(html_text: str, custom_blocked: Set[str], custom_bigrams:
                         cur = p_sale if p_sale > 0 else p_reg
                         old = p_was if p_was > cur else (p_reg if (p_sale > 0 and p_reg > p_sale) else 0)
                         rating = safe_float(node.get("product_rating") or node.get("rating"))
+                        reviews = safe_int(node.get("num_reviews") or node.get("rating_count") or node.get("reviews_count"))
 
                         link = f"https://www.noon.com/egypt-ar/{str(node.get('url') or 'deal').strip('/')}/{sku}/p/"
                         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(name, cur) and link not in seen_links:
                             seen_links.add(link)
-                            items.append({"title": clean_title(name), "price": cur, "old": old, "link": link, "coupon": "", "rating": rating, "hint_cat": hint_cat})
+                            items.append({"title": clean_title(name), "price": cur, "old": old, "link": link, "coupon": "", "rating": rating, "reviews": reviews, "hint_cat": hint_cat})
                     for v in node.values():
                         if isinstance(v, (dict, list)):
                             stack.append(v)
@@ -1510,12 +1585,11 @@ def extract_noon_items(html_text: str, custom_blocked: Set[str], custom_bigrams:
 
         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(title, cur):
             seen_links.add(link)
-            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "hint_cat": hint_cat})
+            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "reviews": 0, "hint_cat": hint_cat})
     return items
 
 
 def extract_jumia_items(html_text: str, custom_blocked: Set[str], custom_bigrams: Set[str], hint_cat: str = "") -> List[dict]:
-    """استخراج عروض جوميا مصر (البقالة، العطور، الملابس، الأجهزة، الفلاش سيل)."""
     items = []
     seen_links = set()
     soup = BeautifulSoup(html_text, "html.parser")
@@ -1542,19 +1616,29 @@ def extract_jumia_items(html_text: str, custom_blocked: Set[str], custom_bigrams
         cur = parse_price(prc_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if prc_el else 0
         old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if old_el else 0
 
+        rating = 0.0
+        reviews = 0
+        rev_el = card.select_one("div.rev")
+        if rev_el:
+            rev_txt = rev_el.get_text(" ", strip=True).translate(_TRANS)
+            m_rt = re.search(r"([1-5](?:\.\d)?)\s*out\s*of\s*5", rev_txt, re.I)
+            if m_rt:
+                rating = safe_float(m_rt.group(1))
+            m_rv = re.search(r"\((\d+)\)", rev_txt)
+            if m_rv:
+                reviews = safe_int(m_rv.group(1))
+
         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(title, cur):
             seen_links.add(link)
-            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "hint_cat": hint_cat})
+            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": rating, "reviews": reviews, "hint_cat": hint_cat})
     return items
 
 
 def extract_arkhasfeen_items(html_text: str, custom_blocked: Set[str], custom_bigrams: Set[str], hint_cat: str = "") -> List[dict]:
-    """استخراج شامل لموقع أرخص فين يدعم Next.js App Router (RSC __next_f) والـ HTML."""
     items = []
     seen_links = set()
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # 1. مسار روابط الـ HTML المباشرة داخل الصفحة
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"].strip()
         if not any(p in href for p in ("/product/", "/p/", "/item/", "/deal/")):
@@ -1578,15 +1662,13 @@ def extract_arkhasfeen_items(html_text: str, custom_blocked: Set[str], custom_bi
             seen_links.add(link)
             items.append({
                 "title": title, "price": cur, "old": old,
-                "link": link, "coupon": "", "seller": "متجر محلي", "rating": 0.0, "hint_cat": hint_cat
+                "link": link, "coupon": "", "seller": "متجر محلي", "rating": 0.0, "reviews": 0, "hint_cat": hint_cat
             })
 
-    # 2. مسار قراءة كائنات JSON المدمجة داخل سكربتات Next.js (__next_f أو __NEXT_DATA__)
     for sc in soup.find_all("script"):
         sc_txt = sc.string or ""
         if "price" not in sc_txt and "best_price" not in sc_txt:
             continue
-        # فك الهروب النصي لـ Next.js RSC
         unescaped = sc_txt.replace('\\"', '"').replace("\\\\", "\\")
         for m in re.finditer(r'\{[^{}]*"(?:title|name)"\s*:\s*"([^"]{6,160})"[^{}]*"(?:price|best_price|lowest_price)"\s*:\s*(\d+(?:\.\d+)?)[^{}]*\}', unescaped):
             name = clean_title(m.group(1))
@@ -1602,7 +1684,7 @@ def extract_arkhasfeen_items(html_text: str, custom_blocked: Set[str], custom_bi
                     seen_links.add(prod_url)
                     items.append({
                         "title": name, "price": cur, "old": old if old > cur else 0,
-                        "link": prod_url, "coupon": "", "seller": "متجر محلي", "rating": 0.0, "hint_cat": hint_cat
+                        "link": prod_url, "coupon": "", "seller": "متجر محلي", "rating": 0.0, "reviews": 0, "hint_cat": hint_cat
                     })
 
     return items
@@ -1643,8 +1725,9 @@ def extract_general_items(html_text: str, base_domain: str, custom_blocked: Set[
             or card.find(["del", "s", "strike"])
         )
 
-        cur = parse_price(sp_el.get_text(" ", strip=True), custom_blocked, explicit_egp=_element_has_egp(sp_el)) if sp_el else 0
-        old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=_element_has_egp(old_el)) if old_el else 0
+        # المتاجر المحلية الخالصة (2B, Raneen, Dream2000) أسعارها دائماً بالجنيه المصري
+        cur = parse_price(sp_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if sp_el else 0
+        old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if old_el else 0
 
         if not cur:
             for pt in card.find_all(class_=re.compile(r"price", re.I)):
@@ -1655,7 +1738,7 @@ def extract_general_items(html_text: str, base_domain: str, custom_blocked: Set[
 
         if cur >= MIN_PRODUCT_PRICE_GLOBAL and not is_phone_accessory(title, cur):
             seen_links.add(link)
-            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "hint_cat": hint_cat})
+            items.append({"title": title, "price": cur, "old": old if old > cur else 0, "link": link, "coupon": "", "rating": 0.0, "reviews": 0, "hint_cat": hint_cat})
     return items
 
 
@@ -1667,33 +1750,26 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
     p2 = pages[(run_seed + 1) % 6]
     p3 = pages[(run_seed + 2) % 6]
 
-    # مسح متعدد الصفحات لأمازون مصر لتخطي آلاف السلع
     amazon_base_queries = [
-        # 1. السوبرماركت والبقالة والمنظفات (GROC)
         ("https://www.amazon.eg/s?i=grocery&rh=p_n_pct-off-with-tax%3A10-", "GROC"),
         ("https://www.amazon.eg/s?i=grocery&rh=p_n_deal_type%3A26901098031", "GROC"),
         ("https://www.amazon.eg/s?k=زيت+سمن+ارز+مكرونه+سكر+دقيق&i=grocery", "GROC"),
         ("https://www.amazon.eg/s?k=نسكافيه+قهوه+شاي+ليبتون+لبن&i=grocery", "GROC"),
         ("https://www.amazon.eg/s?k=اريال+برسيل+تايد+داوني+فيري+مناديل&rh=p_n_pct-off-with-tax%3A10-", "GROC"),
-        # 2. العطور والتجميل والعناية الشخصية (PERF)
         ("https://www.amazon.eg/s?k=perfume+edp+edt+عطر+برفان&i=beauty&rh=p_n_pct-off-with-tax%3A10-", "PERF"),
         ("https://www.amazon.eg/s?i=beauty&rh=p_n_deal_type%3A26901098031", "PERF"),
         ("https://www.amazon.eg/s?k=lattafa+armaf+afnan+rasasi+عطر&i=beauty", "PERF"),
         ("https://www.amazon.eg/s?k=شامبو+شاور+كريم+مزيل+عرق+لوريال+نيفيا&i=beauty&rh=p_n_pct-off-with-tax%3A15-", "PERF"),
-        # 3. الساعات الكلاسيكية والرياضية والذكية (WATCH)
         ("https://www.amazon.eg/s?k=casio+seiko+citizen+fossil+ساعه+يد&rh=p_n_pct-off-with-tax%3A10-", "WATCH"),
         ("https://www.amazon.eg/s?i=fashion&bbn=21833215031&rh=p_n_pct-off-with-tax%3A15-", "WATCH"),
         ("https://www.amazon.eg/s?k=ساعه+رجالي+ساعه+حريمي+smart+watch&rh=p_n_pct-off-with-tax%3A15-", "WATCH"),
-        # 4. الملابس والأحذية والشنط (FASH)
         ("https://www.amazon.eg/s?i=fashion&rh=p_n_deal_type%3A26901098031", "FASH"),
         ("https://www.amazon.eg/s?k=adidas+nike+puma+skechers+حذاء+كوتشي&i=fashion&rh=p_n_pct-off-with-tax%3A15-", "FASH"),
         ("https://www.amazon.eg/s?k=تيشيرت+قميص+بنطلون+جينز+جاكيت+رجالي&i=fashion&rh=p_n_pct-off-with-tax%3A20-", "FASH"),
         ("https://www.amazon.eg/s?k=ملابس+حريمي+فستان+بيجامه+شنطه&i=fashion&rh=p_n_pct-off-with-tax%3A20-", "FASH"),
-        # 5. العدد اليدوية والكهربائية والسيارات (TOOLS)
         ("https://www.amazon.eg/s?i=hi&rh=p_n_pct-off-with-tax%3A10-", "TOOLS"),
         ("https://www.amazon.eg/s?k=bosch+total+ingco+stanley+شنيور+صاروخ+طقم+عده&rh=p_n_pct-off-with-tax%3A10-", "TOOLS"),
         ("https://www.amazon.eg/s?i=automotive&rh=p_n_pct-off-with-tax%3A15-", "TOOLS"),
-        # 6. الموبايلات واللابتوبات والشاشات والأجهزة المنزلية
         ("https://www.amazon.eg/s?i=electronics&rh=p_n_deal_type%3A26901098031", "MOB"),
         ("https://www.amazon.eg/s?i=electronics&rh=p_n_pct-off-with-tax%3A10-", "MOB"),
         ("https://www.amazon.eg/s?k=samsung+iphone+xiaomi+realme+oppo+vivo&i=electronics", "MOB"),
@@ -1705,13 +1781,11 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
         ("https://www.amazon.eg/s?k=قلايه+خلاط+ميكروويف+مكنسه+مكواه+كاتل&i=kitchen", "APPL")
     ]
 
-    # توليد صفحتين لكل استعلام في أمازون لمضاعفة الحجم الفعلي
     amazon_urls = []
     for base_q, cat_code in amazon_base_queries:
         amazon_urls.append((f"{base_q}&page={p1}&language=ar_AE", cat_code))
         amazon_urls.append((f"{base_q}&page={p2}&language=ar_AE", cat_code))
 
-    # توليد صفحتين لكل قسم في نون مصر (50 منتجاً في الصفحة)
     noon_base_queries = [
         ("https://www.noon.com/egypt-ar/grocery/?sort[by]=discount&sort[dir]=desc", "GROC"),
         ("https://www.noon.com/egypt-ar/grocery/?sort[by]=popularity&sort[dir]=desc", "GROC"),
@@ -1735,7 +1809,6 @@ def build_dynamic_stores(run_seed: int) -> List[dict]:
         noon_urls.append((f"{base_q}&limit=50&page={p1}", cat_code))
         noon_urls.append((f"{base_q}&limit=50&page={p2}", cat_code))
 
-    # روابط جوميا مصر لكل الأقسام
     jumia_urls = [
         (f"https://www.jumia.com.eg/ar/flash-sales/?page={p1}", "GEN"),
         (f"https://www.jumia.com.eg/ar/groceries/?sort=highest-discount&page={p1}", "GROC"),
@@ -1823,7 +1896,7 @@ def _fetch_and_extract_task(
     sid, sname, stype = st["id"], st["name"], st["type"]
     is_amz = (stype == "amazon")
 
-    html_txt = smart_fetch(url, sname, is_amazon=is_amz)
+    html_txt = smart_fetch(url, sid, is_amazon=is_amz)
     if not html_txt:
         return (sid, False, [])
 
@@ -1849,7 +1922,8 @@ def _fetch_and_extract_task(
         item["sid"] = sid
         ident = analyze_product_identity(item["title"], hint_cat=item.get("hint_cat", ""))
         item["sig"] = ident["sig"]
-        item["cross_match_key"] = ident["cross_match_key"]
+        item["core_match_key"] = ident["core_match_key"]
+        item["specs"] = ident["specs"]
         item["exact_model"] = ident["exact_model"]
         item["brand"] = ident["brand"]
         item["category"] = ident["category"]
@@ -1857,13 +1931,13 @@ def _fetch_and_extract_task(
     return (sid, True, ext)
 
 
-# ================= الحلقة التنفيذية الرئيسية =================
+# ================= الحلقة التنفيذية الرئيسية المحمية بـ try/finally =================
 
 def main() -> None:
     t0 = time.time()
     now = int(t0)
     run_seed = int(now // 1800)
-    log(f"🚀 تشغيل محرك الصفقات فائق السعة (V37) - دورة #{run_seed % 10}...")
+    log(f"🚀 تشغيل محرك الصفقات الذكي (V38) - دورة #{run_seed % 10}...")
 
     raw_state = load_json(STATE_FILE)
     raw_history = load_json(HISTORY_FILE)
@@ -1873,261 +1947,282 @@ def main() -> None:
     history = sanitize_history(raw_history, now)
     rules = sanitize_rules(raw_rules)
 
-    process_telegram_feedback(rules, state, now)
-    custom_blocked = {normalize_text(w) for w in rules.get("blocked_keywords", []) if w}
-    custom_bigrams = {normalize_text(bg) for bg in rules.get("blocked_bigrams", []) if bg}
-    blocked_deals = set(rules.get("blocked_deals", []))
-    liked_brands = rules.get("liked_brands", {})
-    cat_affinity = rules.get("category_affinity", {})
-    store_modifiers = rules.get("store_discount_modifiers", {})
-    stats = rules.get("stats", {})
+    try:
+        process_telegram_feedback(rules, state, now)
+        custom_blocked = {normalize_text(w) for w in rules.get("blocked_keywords", []) if w}
+        custom_bigrams = {normalize_text(bg) for bg in rules.get("blocked_bigrams", []) if bg}
+        blocked_deals = set(rules.get("blocked_deals", []))
+        liked_brands = rules.get("liked_brands", {})
+        cat_affinity = rules.get("category_affinity", {})
+        store_modifiers = rules.get("store_discount_modifiers", {})
+        stats = rules.get("stats", {})
 
-    pos = safe_int(stats.get("total_positive"))
-    neg = safe_int(stats.get("total_negative"))
-    total_feedback = pos + neg
-    accuracy_pct = round((pos / total_feedback * 100), 1) if total_feedback > 0 else 100.0
+        state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_HOURS * 3600}
 
-    log(f"🧠 التعلم الذاتي 4.0: {len(blocked_deals)} عرض محظور | {len(custom_blocked)} كلمة و{len(custom_bigrams)} عبارة مستبعدة | الدقة: {accuracy_pct}% ({pos}👍 / {neg}👎).")
-
-    state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_HOURS * 3600}
-
-    stores = build_dynamic_stores(run_seed)
-    all_raw_items: List[dict] = []
-    store_diag: Dict[str, dict] = {
-        st["id"]: {
-            "opened": False, "raw": 0, "unique": 0, "exact_models": 0,
-            "cross_matched": 0, "accepted": 0, "sent": 0, "reject_reasons": Counter()
+        stores = build_dynamic_stores(run_seed)
+        all_raw_items: List[dict] = []
+        store_diag: Dict[str, dict] = {
+            st["id"]: {
+                "opened": False, "raw": 0, "unique": 0, "exact_models": 0,
+                "cross_matched": 0, "accepted": 0, "sent": 0, "reject_reasons": Counter()
+            }
+            for st in stores
         }
-        for st in stores
-    }
 
-    tasks: List[Tuple[dict, str, str]] = []
-    for st in stores:
-        for u_entry in st["urls"]:
-            url_str, h_cat = u_entry if isinstance(u_entry, tuple) else (u_entry, "GEN")
-            tasks.append((st, url_str, h_cat))
+        tasks: List[Tuple[dict, str, str]] = []
+        for st in stores:
+            for u_entry in st["urls"]:
+                url_str, h_cat = u_entry if isinstance(u_entry, tuple) else (u_entry, "GEN")
+                tasks.append((st, url_str, h_cat))
 
-    log(f"⚡ جاري مسح {len(tasks)} صفحة أقسام بالتوازي عبر {MAX_WORKERS} مساراً فائق السرعة...")
+        log(f"⚡ جاري مسح {len(tasks)} صفحة أقسام بالتوازي عبر {MAX_WORKERS} مساراً مع منظم سرعة لكل متجر...")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(_fetch_and_extract_task, t, custom_blocked, custom_bigrams) for t in tasks]
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                sid, ok, ext_items = fut.result()
-                if ok:
-                    store_diag[sid]["opened"] = True
-                    store_diag[sid]["raw"] += len(ext_items)
-                    all_raw_items.extend(ext_items)
-            except Exception as e:
-                log(f"⚠ خطأ في مهمة فحص فرعية: {e}")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(_fetch_and_extract_task, t, custom_blocked, custom_bigrams) for t in tasks]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    sid, ok, ext_items = fut.result()
+                    if ok:
+                        store_diag[sid]["opened"] = True
+                        store_diag[sid]["raw"] += len(ext_items)
+                        all_raw_items.extend(ext_items)
+                except Exception as e:
+                    log(f"⚠ خطأ في مهمة فحص فرعية: {e}")
 
-    log(f"📦 إجمالي المنتجات الخام المستخرجة في هذه الجولة: {len(all_raw_items):,} منتج!")
+        log(f"📦 إجمالي المنتجات الخام المستخرجة في هذه الجولة: {len(all_raw_items):,} منتج!")
 
-    market_by_match = defaultdict(list)
-    for it in all_raw_items:
-        mkey = it.get("cross_match_key")
-        if mkey:
-            market_by_match[mkey].append((it["price"], it["store"], it.get("canonical_seller", "")))
+        # تجميع الموديلات عبر المفتاح الأساسي المرن (Fuzzy Core Match Index)
+        market_by_core = defaultdict(list)
+        for it in all_raw_items:
+            ckey = it.get("core_match_key")
+            if ckey:
+                market_by_core[ckey].append((it["price"], it["store"], it.get("canonical_seller", ""), it.get("specs", {}), it["link"]))
 
-    items_by_store = defaultdict(list)
-    for it in all_raw_items:
-        items_by_store[it["sid"]].append(it)
+        items_by_store = defaultdict(list)
+        for it in all_raw_items:
+            items_by_store[it["sid"]].append(it)
 
-    total_sent = 0
-    cat_sent_counter: Counter = Counter()
+        total_sent = 0
+        cat_sent_counter: Counter = Counter()
 
-    for st in stores:
-        sid = st["id"]
-        sname = st["name"]
-        max_deals = st.get("max_deals", MAX_DEALS_OTHER)
-        raw_list = items_by_store.get(sid, [])
-        diag = store_diag[sid]
-        canonical_sid = get_canonical_store_id(sname)
-        store_disc_mod = store_modifiers.get(canonical_sid, 0)
+        for st in stores:
+            sid = st["id"]
+            sname = st["name"]
+            max_deals = st.get("max_deals", MAX_DEALS_OTHER)
+            raw_list = items_by_store.get(sid, [])
+            diag = store_diag[sid]
+            canonical_sid = get_canonical_store_id(sname)
+            store_disc_mod = store_modifiers.get(canonical_sid, 0)
 
-        unique_store_items: Dict[str, dict] = {}
-        for it in raw_list:
-            clean_link = it["link"].split("?")[0].rstrip("/").lower()
-            if clean_link not in unique_store_items or it["price"] < unique_store_items[clean_link]["price"]:
-                unique_store_items[clean_link] = it
+            unique_store_items: Dict[str, dict] = {}
+            for it in raw_list:
+                clean_link = it["link"].split("?")[0].rstrip("/").lower()
+                if clean_link not in unique_store_items or it["price"] < unique_store_items[clean_link]["price"]:
+                    unique_store_items[clean_link] = it
 
-        diag["unique"] = len(unique_store_items)
-        verified_candidates = []
+            diag["unique"] = len(unique_store_items)
+            verified_candidates = []
 
-        for clean_link, it in unique_store_items.items():
-            if it["exact_model"]:
-                diag["exact_models"] += 1
+            for clean_link, it in unique_store_items.items():
+                if it["exact_model"]:
+                    diag["exact_models"] += 1
 
-            deal_hash = hashlib.md5(clean_link.encode()).hexdigest()[:16]
-            if deal_hash in blocked_deals:
-                diag["reject_reasons"]["user_blocked"] += 1
-                continue
+                deal_hash = hashlib.md5(clean_link.encode()).hexdigest()[:16]
+                if deal_hash in blocked_deals:
+                    diag["reject_reasons"]["user_blocked"] += 1
+                    continue
 
-            h_stats = record_and_analyze_history(history, clean_link, it["price"], now)
+                h_stats = record_and_analyze_history(history, state, rules, deal_hash, clean_link, it["price"], now)
 
-            lowest_other = 0
-            mkey = it.get("cross_match_key")
-            my_canonical = it.get("canonical_seller", "")
-            if mkey:
-                valid_competitors = [
-                    p for p, st_name, comp_canonical in market_by_match.get(mkey, [])
-                    if st_name != it["store"] and (not my_canonical or comp_canonical != my_canonical)
-                ]
-                if valid_competitors:
-                    lowest_other = min(valid_competitors)
-                    diag["cross_matched"] += 1
+                lowest_other = 0
+                same_store_higher = 0
+                ckey = it.get("core_match_key")
+                my_canonical = it.get("canonical_seller", "")
+                my_specs = it.get("specs", {})
+                item_cat = it.get("category", "GEN")
 
-            item_cat = it.get("category", "GEN")
-            is_deal, deal_type, ref_price, saving_pct, conf_score, reason = evaluate_deal(
-                cur=it["price"],
-                old=it["old"],
-                cat=item_cat,
-                h_stats=h_stats,
-                market_lowest_other=lowest_other,
-                exact_model=it["exact_model"],
-                has_coupon=bool(it.get("coupon")),
-                brand_liked=bool(liked_brands.get(it["brand"], 0) > 0),
-                cat_bonus=cat_affinity.get(item_cat, 0),
-                store_disc_mod=store_disc_mod,
-                rating=safe_float(it.get("rating"))
+                if ckey:
+                    valid_competitors = []
+                    same_store_prices = []
+                    for p, st_name, comp_canonical, comp_specs, comp_link in market_by_core.get(ckey, []):
+                        if not specs_are_compatible(my_specs, comp_specs, item_cat):
+                            continue
+                        if st_name != it["store"] and (not my_canonical or comp_canonical != my_canonical):
+                            valid_competitors.append(p)
+                        elif comp_link.split("?")[0].rstrip("/").lower() != clean_link and p > it["price"]:
+                            same_store_prices.append(p)
+
+                    if valid_competitors:
+                        lowest_other = min(valid_competitors)
+                        diag["cross_matched"] += 1
+                    if same_store_prices:
+                        same_store_higher = max(same_store_prices)
+
+                is_deal, deal_type, ref_price, saving_pct, conf_score, reason = evaluate_deal(
+                    cur=it["price"],
+                    old=it["old"],
+                    cat=item_cat,
+                    brand=it.get("brand", ""),
+                    h_stats=h_stats,
+                    market_lowest_other=lowest_other,
+                    same_store_higher=same_store_higher,
+                    exact_model=it["exact_model"],
+                    has_coupon=bool(it.get("coupon")),
+                    brand_liked=bool(liked_brands.get(it["brand"], 0) > 0),
+                    cat_bonus=cat_affinity.get(item_cat, 0),
+                    store_disc_mod=store_disc_mod,
+                    rating=safe_float(it.get("rating")),
+                    reviews=safe_int(it.get("reviews"))
+                )
+
+                if not is_deal:
+                    diag["reject_reasons"][reason] += 1
+                    continue
+
+                prev_sent = state.get(deal_hash)
+                if prev_sent and it["price"] >= prev_sent.get("price", it["price"]) * 0.96:
+                    diag["reject_reasons"]["recently_sent"] += 1
+                    continue
+
+                diag["accepted"] += 1
+                it["clean_link"] = clean_link
+                it["deal_hash"] = deal_hash
+                it["deal_type"] = deal_type
+                it["ref_price"] = ref_price
+                it["saving_pct"] = saving_pct
+                it["conf_score"] = conf_score
+                it["min_30d"] = h_stats["min_30d"]
+                it["obs_days_30d"] = h_stats["obs_days_30d"]
+                it["history_strength"] = h_stats["history_strength"]
+                it["lowest_other"] = lowest_other
+                verified_candidates.append(it)
+
+            top_reasons = ", ".join(f"{k}:{v}" for k, v in diag["reject_reasons"].most_common(4)) or "لا يوجد"
+            log(
+                f"📋 تشخيص [{sname}]: فريد={diag['unique']} | بموديل={diag['exact_models']} "
+                f"| مقارن={diag['cross_matched']} | مقبول={diag['accepted']} | أسباب الاستبعاد=({top_reasons})"
             )
 
-            if not is_deal:
-                diag["reject_reasons"][reason] += 1
-                continue
-
-            prev_sent = state.get(deal_hash)
-            if prev_sent and it["price"] >= prev_sent.get("price", it["price"]) * 0.96:
-                diag["reject_reasons"]["recently_sent"] += 1
-                continue
-
-            diag["accepted"] += 1
-            it["clean_link"] = clean_link
-            it["deal_hash"] = deal_hash
-            it["deal_type"] = deal_type
-            it["ref_price"] = ref_price
-            it["saving_pct"] = saving_pct
-            it["conf_score"] = conf_score
-            it["min_30d"] = h_stats["min_30d"]
-            it["obs_days_30d"] = h_stats["obs_days_30d"]
-            it["history_strength"] = h_stats["history_strength"]
-            it["lowest_other"] = lowest_other
-            verified_candidates.append(it)
-
-        top_reasons = ", ".join(f"{k}:{v}" for k, v in diag["reject_reasons"].most_common(4)) or "لا يوجد"
-        log(
-            f"📋 تشخيص [{sname}]: فريد={diag['unique']} | بموديل={diag['exact_models']} "
-            f"| مقارن={diag['cross_matched']} | مقبول={diag['accepted']} | أسباب الاستبعاد=({top_reasons})"
-        )
-
-        verified_candidates.sort(
-            key=lambda x: (
-                "قيد التوثيق" not in x["deal_type"],
-                x["conf_score"],
-                x["saving_pct"],
-                x["ref_price"] - x["price"]
-            ),
-            reverse=True
-        )
-
-        # تنويع متوازن للأقسام داخل نفس المتجر (Round-Robin Category Quota)
-        selected_for_store: List[dict] = []
-        cat_bucket_counts: Counter = Counter()
-        max_per_cat_in_store = max(3, max_deals // 3)
-
-        for cand in verified_candidates:
-            c_cat = cand.get("category", "GEN")
-            if cat_bucket_counts[c_cat] < max_per_cat_in_store and len(selected_for_store) < max_deals:
-                selected_for_store.append(cand)
-                cat_bucket_counts[c_cat] += 1
-
-        for cand in verified_candidates:
-            if len(selected_for_store) >= max_deals:
-                break
-            if cand not in selected_for_store:
-                selected_for_store.append(cand)
-
-        sent_store = 0
-        for it in selected_for_store:
-            saving = it["ref_price"] - it["price"]
-            dtype = it["deal_type"]
-            conf = it["conf_score"]
-            obs_d = it.get("obs_days_30d", 0)
-            h_str = it.get("history_strength", "none")
-            item_cat = it.get("category", "GEN")
-            cat_badge = CATEGORY_LABELS_AR.get(item_cat, "🛍 عروض متنوعة")
-            strength_ar = {"strong": "قوي", "medium": "متوسط", "weak": "محدود"}.get(h_str, "جديد")
-
-            if dtype == "هبوط سعر صامت موثق":
-                tag = f"📉 <b>هبوط سعر صامت موثق — {htmllib.escape(it['store'])}</b>"
-                ref_txt = f"🏷 وسيط السعر ({obs_d} أيام رصد - إثبات {strength_ar}): {it['ref_price']:,} ج.م (نزل {it['saving_pct']}% — وفر {saving:,} ج.م)"
-            elif dtype == "هبوط تاريخي بالمتجر (يتوفر منافس قريب)":
-                tag = f"📉 <b>هبوط تاريخي بالمتجر — {htmllib.escape(it['store'])}</b>\n<i>(ملاحظة: يتوفر منافس بسعر {it['lowest_other']:,} ج.م)</i>"
-                ref_txt = f"🏷 وسيط سعر المتجر ({obs_d} أيام رصد): {it['ref_price']:,} ج.م (نزل {it['saving_pct']}%)"
-            elif dtype == "أرخص بين المتاجر المفحوصة":
-                tag = f"🏆 <b>أقل سعر بين المتاجر المفحوصة — {htmllib.escape(it['store'])}</b>"
-                ref_txt = f"🏪 أقل سعر لدى المنافسين حالياً: {it['ref_price']:,} ج.م (أرخص بـ {saving:,} ج.م)"
-            elif dtype == "خصم معلن موثق":
-                tag = f"✅ <b>عرض معلن موثق — {htmllib.escape(it['store'])}</b> (خصم {it['saving_pct']}%)"
-                ref_txt = f"🏷 السعر المرجعي الموثق: {it['ref_price']:,} ج.م (توفير {saving:,} ج.م)"
-            else:
-                tag = f"🔥 <b>خصم مميز مرصود — {htmllib.escape(it['store'])}</b> (خصم {it['saving_pct']}%)"
-                ref_txt = f"🏷 السعر السابق بالموقع: {it['ref_price']:,} ج.م (وفر {saving:,} ج.م)"
-
-            hist_line = (
-                f"📊 أقل سعر مسجل ({obs_d} يوم رصد في آخر 30 يوماً): {it['min_30d']:,} ج.م\n"
-                if it.get("min_30d") and obs_d > 0 else ""
-            )
-            rate_line = f"⭐ تقييم المنتج: <b>{it['rating']}/5</b>\n" if it.get("rating", 0) >= 3.5 else ""
-            coupon_line = f"🎟 <b>كود خصم إضافي: {htmllib.escape(it['coupon'])}</b>\n" if it.get("coupon") else ""
-            msg = (
-                f"{tag}\n"
-                f"📂 القسم: <b>{cat_badge}</b>\n\n"
-                f"📦 {htmllib.escape(it['title'])}\n"
-                f"💰 السعر النقدي الآن: <b>{it['price']:,} ج.م</b>\n"
-                f"{ref_txt}\n"
-                f"{hist_line}"
-                f"{rate_line}"
-                f"{coupon_line}"
-                f"🛡 مؤشر ثقة الصفقة: <b>{conf}/100</b>\n"
-                f"🔗 {it['link']}"
+            verified_candidates.sort(
+                key=lambda x: (
+                    "قيد التوثيق" not in x["deal_type"],
+                    x["conf_score"],
+                    x["saving_pct"],
+                    x["ref_price"] - x["price"]
+                ),
+                reverse=True
             )
 
-            msg_id = send_telegram_deal(msg, it["deal_hash"])
-            if msg_id is not None:
-                state[it["deal_hash"]] = {
-                    "price": it["price"],
-                    "ts": now,
-                    "title": it["title"],
-                    "brand": it["brand"],
-                    "category": item_cat,
-                    "store": it["store"],
-                    "link": it["clean_link"],
-                    "message_id": msg_id,
-                    "rated_by": []
-                }
-                save_json(STATE_FILE, state)
-                sent_store += 1
-                total_sent += 1
-                cat_sent_counter[cat_badge] += 1
-                time.sleep(1.1)
+            selected_for_store: List[dict] = []
+            cat_bucket_counts: Counter = Counter()
+            max_per_cat_in_store = max(3, max_deals // 3)
 
-        diag["sent"] = sent_store
+            for cand in verified_candidates:
+                c_cat = cand.get("category", "GEN")
+                if cat_bucket_counts[c_cat] < max_per_cat_in_store and len(selected_for_store) < max_deals:
+                    selected_for_store.append(cand)
+                    cat_bucket_counts[c_cat] += 1
 
-    if len(history) > 35000:
-        sorted_h = sorted(history.items(), key=lambda kv: safe_int(kv[1].get("ts") if isinstance(kv[1], dict) else 0))
-        history = dict(sorted_h[-35000:])
+            for cand in verified_candidates:
+                if len(selected_for_store) >= max_deals:
+                    break
+                if cand not in selected_for_store:
+                    selected_for_store.append(cand)
 
-    save_json(STATE_FILE, state)
-    save_json(HISTORY_FILE, history)
-    save_json(RULES_FILE, rules)
-    git_ok = commit_state(state, history, rules)
+            sent_store = 0
+            for it in selected_for_store:
+                saving = it["ref_price"] - it["price"]
+                dtype = it["deal_type"]
+                conf = it["conf_score"]
+                obs_d = it.get("obs_days_30d", 0)
+                h_str = it.get("history_strength", "none")
+                item_cat = it.get("category", "GEN")
+                cat_badge = CATEGORY_LABELS_AR.get(item_cat, "🛍 عروض متنوعة")
+                strength_ar = {"strong": "قوي", "medium": "متوسط", "weak": "محدود"}.get(h_str, "جديد")
+
+                if dtype == "هبوط سعر صامت موثق":
+                    tag = f"📉 <b>هبوط سعر صامت موثق — {htmllib.escape(it['store'])}</b>"
+                    ref_txt = f"🏷 وسيط السعر ({obs_d} أيام رصد - إثبات {strength_ar}): {it['ref_price']:,} ج.م (نزل {it['saving_pct']}% — وفر {saving:,} ج.م)"
+                elif dtype == "هبوط تاريخي بالمتجر (يتوفر منافس قريب)":
+                    tag = f"📉 <b>هبوط تاريخي بالمتجر — {htmllib.escape(it['store'])}</b>\n<i>(ملاحظة: يتوفر منافس بسعر {it['lowest_other']:,} ج.م)</i>"
+                    ref_txt = f"🏷 وسيط سعر المتجر ({obs_d} أيام رصد): {it['ref_price']:,} ج.م (نزل {it['saving_pct']}%)"
+                elif dtype == "أرخص بين المتاجر المفحوصة":
+                    tag = f"🏆 <b>أقل سعر بين المتاجر المفحوصة — {htmllib.escape(it['store'])}</b>"
+                    ref_txt = f"🏪 أقل سعر لدى المنافسين حالياً: {it['ref_price']:,} ج.م (أرخص بـ {saving:,} ج.م)"
+                elif dtype == "خصم معلن موثق":
+                    tag = f"✅ <b>عرض معلن موثق — {htmllib.escape(it['store'])}</b> (خصم {it['saving_pct']}%)"
+                    ref_txt = f"🏷 السعر المرجعي الموثق: {it['ref_price']:,} ج.م (توفير {saving:,} ج.م)"
+                else:
+                    tag = f"🔥 <b>خصم مميز مرصود — {htmllib.escape(it['store'])}</b> (خصم {it['saving_pct']}%)"
+                    ref_txt = f"🏷 السعر السابق بالموقع: {it['ref_price']:,} ج.م (وفر {saving:,} ج.م)"
+
+                hist_line = (
+                    f"📊 أقل سعر مسجل ({obs_d} يوم رصد في آخر 30 يوماً): {it['min_30d']:,} ج.م\n"
+                    if it.get("min_30d") and obs_d > 0 else ""
+                )
+                rev_cnt = safe_int(it.get("reviews"))
+                rev_str = f" ({rev_cnt:,} تقييم)" if rev_cnt > 0 else ""
+                rate_line = f"⭐ تقييم المنتج: <b>{it['rating']}/5</b>{rev_str}\n" if it.get("rating", 0) >= 3.4 else ""
+                coupon_line = f"🎟 <b>كود خصم إضافي: {htmllib.escape(it['coupon'])}</b>\n" if it.get("coupon") else ""
+                safe_link = sanitize_url(it["link"])
+
+                msg = (
+                    f"{tag}\n"
+                    f"📂 القسم: <b>{cat_badge}</b>\n\n"
+                    f"📦 {htmllib.escape(it['title'])}\n"
+                    f"💰 السعر النقدي الآن: <b>{it['price']:,} ج.م</b>\n"
+                    f"{ref_txt}\n"
+                    f"{hist_line}"
+                    f"{rate_line}"
+                    f"{coupon_line}"
+                    f"🛡 مؤشر ثقة الصفقة: <b>{conf}/100</b>\n"
+                    f"🔗 {safe_link}"
+                )
+
+                msg_id = send_telegram_deal(msg, it["deal_hash"])
+                if msg_id is not None:
+                    state[it["deal_hash"]] = {
+                        "price": it["price"],
+                        "ts": now,
+                        "title": it["title"],
+                        "brand": it["brand"],
+                        "category": item_cat,
+                        "store": it["store"],
+                        "link": it["clean_link"],
+                        "message_id": msg_id,
+                        "auto_rewarded": False,
+                        "rated_by": []
+                    }
+                    sent_store += 1
+                    total_sent += 1
+                    cat_sent_counter[cat_badge] += 1
+                    if total_sent % 5 == 0:
+                        save_json(STATE_FILE, state)
+                    time.sleep(1.1)
+
+            diag["sent"] = sent_store
+
+    finally:
+        # ضمان حفظ الذاكرة دائماً حتى في حال حدوث أي انقطاع مفاجئ
+        if len(history) > 35000:
+            sorted_h = sorted(history.items(), key=lambda kv: safe_int(kv[1].get("ts") if isinstance(kv[1], dict) else 0))
+            history = dict(sorted_h[-35000:])
+        save_json(STATE_FILE, state)
+        save_json(HISTORY_FILE, history)
+        save_json(RULES_FILE, rules)
+        git_ok = commit_state(state, history, rules)
+
+    pos = safe_int(rules.get("stats", {}).get("total_positive"))
+    neg = safe_int(rules.get("stats", {}).get("total_negative"))
+    auto_wins = safe_int(rules.get("stats", {}).get("auto_verified_wins"))
+    total_feedback = pos + neg + auto_wins
+    accuracy_pct = round(((pos + auto_wins) / total_feedback * 100), 1) if total_feedback > 0 else 100.0
 
     elapsed = (time.time() - t0) / 60.0
     total_raw_scanned = sum(d["raw"] for d in store_diag.values())
     total_unique_scanned = sum(d["unique"] for d in store_diag.values())
     summary_lines = [
-        "📊 <b>ملخص جولة محرك الصفقات العملاق (V37)</b>",
+        "📊 <b>ملخص جولة محرك الصفقات الذكي (V38)</b>",
         f"🔎 إجمالي السلع المفحوصة: <b>{total_raw_scanned:,} إجمالي ({total_unique_scanned:,} سلعة فريدة)</b>",
         ""
     ]
@@ -2146,7 +2241,7 @@ def main() -> None:
         cat_summary = " | ".join(f"{k}: {v}" for k, v in cat_sent_counter.most_common())
         summary_lines.append(f"\n📂 <b>توزيع الأقسام المرسلة</b>:\n{cat_summary}")
 
-    summary_lines.append(f"\n🧠 <b>التعلم الذاتي 4.0</b>: دقة الرادار {accuracy_pct}% ({pos}👍 مقابل {neg}👎)")
+    summary_lines.append(f"\n🧠 <b>التعلم الذاتي 5.0</b>: الدقة {accuracy_pct}% ({pos}👍 | {neg}👎 | {auto_wins}🎯 توثيق تلقائي)")
     summary_lines.append(f"💾 حالة الذاكرة: {'تم الحفظ في GitHub ✅' if git_ok else 'محفوظ محلياً فقط ⚠️'}")
     summary_lines.append(f"⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي الصفقات المرسلة: <b>{total_sent}</b>")
     summary_text = "\n".join(summary_lines)
