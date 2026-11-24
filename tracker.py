@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-رادار الصفقات المصري الاحترافي — V40 (Live Cross-Store Verifier & Zero-Fake Engine)
-===================================================================================
-التحولات المعمارية الجذرية في V40:
-1. التحقق المباشر الحي من المنافسين قبل الإرسال (Live Cross-Store Verification):
-   - قبل إرسال أي صفقة من أمازون -> يفحص سعر نفس المنتج لحظياً في نون مصر.
-   - قبل إرسال أي صفقة من نون/جوميا/2B/رنين/دريم -> يفحص سعر نفس المنتج لحظياً في أمازون مصر.
-   - إذا وُجد المنافس أرخص أو بفارق غير مجزٍ -> يتم إحباط الصفقة فوراً وتسجيلها كخصم وهمي!
-2. سياسة عدم الثقة في السعر المشطوب (Zero-Trust Strikethrough Policy):
-   - لا يُقبل أي عرض بناءً على السعر المشطوب وحده؛ يُشترط إثبات منافس مباشر، أو هبوط تاريخي موثق (3+ أيام)،
-     أو هبوط عن متوسط الموديل في السوق، أو عرض فعالية/كوبون لماركة معروفة اجتاز الفحص المباشر بلا منافس أرخص.
-3. منع التكرار لمدة 14 يوماً بالرابط وبـهوية المنتج معاً (Dual URL + Variant 14-Day Cooldown).
-4. ذاكرة أسعار سوقية دائمة عبر المتاجر (data/market_index.json) تتراكم يومياً لتعزيز المقارنة.
-5. مراكز فعاليات نوفمبر والعروض الموسمية (الجمعة البيضاء / الصفراء / البلاك فرايدي / الفلاش سيل).
-6. التعلم الذاتي 7.0 النظيف: تطهير الكلمات العامة المحظورة خطأً، ومنع تسمم النقاط، والمعاقبة التلقائية للخصومات الوهمية.
+رادار الصفقات المصري الاحترافي — V41 (High-Precision Multi-Source & Google-Aware Engine)
+========================================================================================
+التحسينات الجذرية في V41:
+1. معايير قبول عالية وصارمة: منع إرسال أي عرض مبني على خصم مشطوب غير موثق أو بلا إثبات سعري حقيقي.
+2. تحقق مباشر متعدد المصادر: فحص السعر في المنافسين (أمازون / نون) + فحص أسعار السوق عبر جوجل قبل الإرسال.
+3. توسيع نطاق الفحص وتحسين استخراج الموديلات لزيادة عدد المنتجات القابلة للمقارنة الحقيقية.
+4. معالجة تقطع فتح جوميا: تنويع الروابط والصفحات، وتقليل التزامن عليها، وتبديل آليات الجلب عند الحجب المؤقت.
+5. منع التكرار لمدة 14 يوماً بالرابط وهوية المنتج معاً + الحفاظ على التعلم الذاتي النظيف.
 """
 
 from __future__ import annotations
@@ -37,7 +31,7 @@ import urllib.parse
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-print("⚡ بدء تشغيل محرك الصفقات V40 (التحقق المباشر من المنافسين + درع العروض الوهمية)...", flush=True)
+print("⚡ بدء تشغيل محرك الصفقات V41 (معايير صارمة + تحقق مباشر + فحص جوجل + تحسين جوميا)...", flush=True)
 
 import requests
 from bs4 import BeautifulSoup
@@ -60,26 +54,23 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 ADMIN_USER_ID = os.environ.get("ADMIN_USER_ID")
 
-MIN_PRODUCT_PRICE_GLOBAL = int(os.environ.get("MIN_PRODUCT_PRICE", 40))
-MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 70))
+MIN_PRODUCT_PRICE_GLOBAL = int(os.environ.get("MIN_PRODUCT_PRICE", 50))
+MAX_REALISTIC_DISC = int(os.environ.get("MAX_REALISTIC_DISC", 65))
 
-MIN_CONF_VERIFIED = int(os.environ.get("MIN_CONF_VERIFIED", 66))
-MIN_CONF_EVENT_FALLBACK = int(os.environ.get("MIN_CONF_UNVERIFIED", 62))
+MIN_CONF_VERIFIED = int(os.environ.get("MIN_CONF_VERIFIED", 72))
 
 MAX_DEALS_AMAZON = 15
 MAX_DEALS_NOON = 12
-MAX_DEALS_JUMIA = 8
-MAX_DEALS_OTHER = int(os.environ.get("MAX_DEALS_PER_STORE", 6))
+MAX_DEALS_JUMIA = 10
+MAX_DEALS_OTHER = int(os.environ.get("MAX_DEALS_PER_STORE", 7))
 MAX_TOTAL_SENT_PER_RUN = 30
-MAX_UNVERIFIED_EVENT_PER_RUN = 6
 
-# رفع فترة منع التكرار من 48 ساعة إلى 14 يوماً كاملة!
 REALERT_DAYS = 14
-REALERT_MIN_EXTRA_DROP_RATIO = 0.90  # لا يُعاد الإرسال خلال 14 يوماً إلا لو نزل السعر 10% إضافية على الأقل
+REALERT_MIN_EXTRA_DROP_RATIO = 0.90
 
 MAX_WORKERS = 10
-VERIFY_WORKERS = 6
-MAX_LIVE_VERIFICATIONS = 42
+VERIFY_WORKERS = 5
+MAX_LIVE_VERIFICATIONS = 55
 
 DATA_DIR = "data" if os.path.isdir("data") else "."
 STATE_FILE = os.path.join(DATA_DIR, "sent_deals.json")
@@ -95,9 +86,17 @@ UA_LIST = [
 ]
 AR_LANG = "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7"
 
-_DOMAIN_SEMAPHORES: Dict[str, threading.Semaphore] = defaultdict(lambda: threading.Semaphore(3))
+# تحديد سعة متوازي أهدأ لجوميا لتقليل حجب 403/429
+_DOMAIN_SEMAPHORES: Dict[str, threading.Semaphore] = {
+    "jumia": threading.Semaphore(1),
+    "amazon": threading.Semaphore(3),
+    "noon": threading.Semaphore(3),
+}
+_DEFAULT_SEM = threading.Semaphore(3)
+
 _LIVE_CACHE_LOCK = threading.Lock()
 _LIVE_SEARCH_CACHE: Dict[Tuple[str, str], List[dict]] = {}
+_GOOGLE_PRICE_CACHE: Dict[str, int] = {}
 
 _AR_DIGITS = "".join(chr(0x0660 + i) for i in range(10)) + "".join(chr(0x06F0 + i) for i in range(10)) + "\u066b\u066c\u060c"
 _TRANS = str.maketrans(_AR_DIGITS, "0123456789" * 2 + ".,,")
@@ -107,6 +106,10 @@ _DIACRITICS_RE = re.compile(r"[\u064B-\u065F]")
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def get_domain_semaphore(store_id: str) -> threading.Semaphore:
+    return _DOMAIN_SEMAPHORES.get(store_id, _DEFAULT_SEM)
 
 
 def safe_int(v: Any, default: int = 0) -> int:
@@ -163,7 +166,6 @@ PHONE_ACCESSORY_WORDS_NORM: Set[str] = {normalize_text(w) for w in (
     "كفر موبايل", "غطاء حمايه", "حافظه موبايل", "استيك ساعه", "سوار بديل"
 )}
 
-# درع الكلمات الشائعة (يمنع التعلم الذاتي من حظر كلمات وصفية طبيعية وتسميم البحث!)
 GENERIC_SHIELD_WORDS: Set[str] = {normalize_text(w) for w in (
     "رجالي", "حريمي", "نسائي", "اطفال", "للرجال", "للنساء", "للجنسين", "شبابي",
     "اسود", "ابيض", "ازرق", "احمر", "اخضر", "رمادي", "فضي", "ذهبي", "بيج", "بني", "كحلي", "وردي",
@@ -226,7 +228,6 @@ _EVENT_BADGE_RE = re.compile(
     re.I
 )
 
-# رموز مواصفات ومعايير تقنية تُستبعد من مفتاح الموديل حتى لا تُفشل المطابقة بين المتاجر
 _NON_MODEL_ALPHANUM_RE = re.compile(
     r"^(?:\d+(?:w|mah|mp|hz|v|a|mm|cm|m|rpm|btu|bar|psi|db|fps|nit|nits|gb|tb|ml|gm|g|kg|l|pcs|th|nm|ghz|mhz|kw|hp|oz)"
     r"|ip\d{2}|usb\d?|usbc|typec|wifi\d?|bt\d(?:\.\d)?|ddr\d|lpddr\d[x]?|pcie\d|win\d{2}|hdr\d*|gen\d{1,2}|cat\d[a-z]?"
@@ -235,7 +236,7 @@ _NON_MODEL_ALPHANUM_RE = re.compile(
 )
 
 
-# ================= إدارة الملفات وتنظيف البيانات وتطهير الذاكرة =================
+# ================= إدارة الملفات وتنظيف البيانات =================
 
 def sanitize_state(raw_state: Any) -> dict:
     if not isinstance(raw_state, dict):
@@ -281,11 +282,10 @@ def sanitize_history(raw_history: Any, now: int) -> dict:
 
 
 def sanitize_market_index(raw_market: Any, now: int) -> dict:
-    """ذاكرة السوق الدائمة (10 أيام) لتخزين أقل سعر رُصد لكل موديل في كل متجر."""
     if not isinstance(raw_market, dict):
         return {}
     clean = {}
-    cutoff = now - 10 * DAY
+    cutoff = now - 14 * DAY
     for mkey, store_map in raw_market.items():
         if not isinstance(mkey, str) or not isinstance(store_map, dict):
             continue
@@ -305,7 +305,6 @@ def sanitize_rules(raw_rules: Any) -> dict:
     if not isinstance(raw_rules, dict):
         raw_rules = {}
 
-    # تطهير تلقائي للذاكرة من أي كلمات وصفية عامة حُظرت خطأً في النسخ السابقة
     raw_strikes = raw_rules.get("word_strikes") or {}
     strikes = {
         str(k): safe_int(v)
@@ -332,13 +331,12 @@ def sanitize_rules(raw_rules: Any) -> dict:
     liked = {str(k): safe_int(v) for k, v in (raw_rules.get("liked_brands") or {}).items() if safe_int(v) != 0}
     cat_affinity = {str(k): safe_int(v) for k, v in (raw_rules.get("category_affinity") or {}).items() if safe_int(v) != 0}
     store_mod = {str(k): safe_int(v) for k, v in (raw_rules.get("store_discount_modifiers") or {}).items() if -4 <= safe_int(v) <= 15}
-    page_cursors = {str(k): safe_int(v, 1) for k, v in (raw_rules.get("page_cursors") or {}).items() if 1 <= safe_int(v, 1) <= 6}
+    page_cursors = {str(k): safe_int(v, 1) for k, v in (raw_rules.get("page_cursors") or {}).items() if 1 <= safe_int(v, 1) <= 8}
 
-    # تصفير النقاط المسمومة من V39 مرة واحدة عند الترقية إلى V40
     schema_ver = safe_int(raw_rules.get("schema_version"), 0)
-    if schema_ver < 40:
+    if schema_ver < 41:
         kw_scores: Dict[str, int] = {}
-        log("🧹 ترقية الذاكرة إلى V40: تم تطهير نقاط الكلمات البحثية والكلمات العامة المحظورة خطأً.")
+        log("🧹 ترقية الذاكرة إلى V41: إعادة معايرة نقاط الكلمات وتطهير الكلمات العامة.")
     else:
         kw_scores = {str(k): safe_int(v, 0) for k, v in (raw_rules.get("keyword_scores") or {}).items() if -10 <= safe_int(v, 0) <= 100}
 
@@ -353,7 +351,7 @@ def sanitize_rules(raw_rules: Any) -> dict:
 
     stats_raw = raw_rules.get("stats") or {}
     return {
-        "schema_version": 40,
+        "schema_version": 41,
         "webhook_cleared": bool(raw_rules.get("webhook_cleared", False)),
         "last_update_id": safe_int(raw_rules.get("last_update_id")),
         "run_counter": safe_int(raw_rules.get("run_counter")),
@@ -373,6 +371,7 @@ def sanitize_rules(raw_rules: Any) -> dict:
             "total_negative": safe_int(stats_raw.get("total_negative")),
             "auto_verified_wins": safe_int(stats_raw.get("auto_verified_wins")),
             "fake_caught_live": safe_int(stats_raw.get("fake_caught_live")),
+            "google_cheaper_caught": safe_int(stats_raw.get("google_cheaper_caught")),
             "last_decay_ts": safe_int(stats_raw.get("last_decay_ts"))
         }
     }
@@ -449,7 +448,7 @@ def commit_state(state: dict, history: dict, rules: dict, market_index: dict) ->
             return True
 
         c_res = subprocess.run(
-            ["git", "commit", "-m", "chore: update radar verified memory V40", "--only", "--"] + target_files,
+            ["git", "commit", "-m", "chore: update radar verified memory V41", "--only", "--"] + target_files,
             capture_output=True, text=True, check=False
         )
         if c_res.returncode != 0:
@@ -475,7 +474,7 @@ def commit_state(state: dict, history: dict, rules: dict, market_index: dict) ->
         return False
 
 
-# ================= تليجرام والتعلم الذاتي 7.0 =================
+# ================= تليجرام والتعلم الذاتي =================
 
 def _tg_post(endpoint: str, payload: dict) -> Optional[dict]:
     if not BOT_TOKEN:
@@ -681,7 +680,6 @@ def process_telegram_feedback(rules: dict, state: dict, now: int) -> None:
                 if kw:
                     kw_scores[kw] = max(-10, kw_scores.get(kw, 0) - 3)
 
-                # تشديد حظر الكلمات (4 مخالفات + محمي بدرع الكلمات الشائعة لعدم تسميم البحث)
                 words_list = [w for w in re.findall(r"[a-z0-9]+|[\u0600-\u06FF]+", normalize_text(title)) if len(w) >= 5 and not w.isdigit()]
                 for w in words_list:
                     if w not in PROTECTED_WORDS_NORM:
@@ -696,7 +694,6 @@ def process_telegram_feedback(rules: dict, state: dict, now: int) -> None:
                         if bigram_strikes[bg] >= 3 and bg not in blocked_bigrams:
                             blocked_bigrams.append(bg)
 
-                log(f"🧠 تعلم ذاتي 7.0: حظر العرض [{title[:35]}] وتشديد الفلتر على [{canonical_store}].")
                 if cb_id:
                     _tg_post("answerCallbackQuery", {
                         "callback_query_id": cb_id,
@@ -755,10 +752,6 @@ def get_canonical_store_id(store_str: str) -> str:
         return "btech"
     if any(k in s for k in ("raya", "رايه", "راية")):
         return "raya"
-    if any(k in s for k in ("cairo sales", "كايرو سيلز")):
-        return "cairosales"
-    if any(k in s for k in ("elghazawy", "الغزاوي")):
-        return "elghazawy"
     return s[:15]
 
 
@@ -770,7 +763,8 @@ CANONICAL_AR_NAMES = {
     "raneen": "رنين",
     "dream2000": "دريم 2000",
     "btech": "بي تك",
-    "raya": "راية"
+    "raya": "راية",
+    "google": "نتائج جوجل"
 }
 
 
@@ -859,7 +853,7 @@ def clean_title(t: str) -> str:
     return re.sub(r"^[-\u2212\u2013]?\s*\d{1,2}\s?%\s*", "", t)[:190]
 
 
-# ================= محرك الهوية ومطابقة الموديلات الدقيق V4 =================
+# ================= محرك الهوية ومطابقة الموديلات =================
 
 _BRAND_ALIASES = {
     "سامسونج": "samsung", "ابل": "apple", "ايفون": "apple", "ايباد": "apple",
@@ -1039,7 +1033,6 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
 
     vol_weight_specs = _extract_volume_and_weight(t)
 
-    # استخراج عائلة المعالج (i3/i5/i7/i9/ryzen5/m2)
     cpu_family = ""
     m_cpu_full = re.search(r"\b(i[3579]|ryzen\s*[3579]|m[1234](?:\s*(?:pro|max))?)\s*[-_]?\s*(\d{4,5}[a-z]{0,3})?\b", t)
     if m_cpu_full:
@@ -1066,7 +1059,6 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
     t = re.sub(r"\b\d{1,4}\s*(?:gb|tb|g\.b|جيجا|جيجابايت|جيجا|تيرا|تيرابايت|تيرا)\b", " ", t)
     t = re.sub(r"(\d{2}(?:\.\d)?)\s*inch\b", r" \1inch ", t)
 
-    # دمج السلاسل الشهيرة مع أرقامها قبل التقطيع
     t = re.sub(r"\b(iphone|ipad|redmi|poco|note|tab|watch|band|airpods|series|mi|reno|narzo|spark|hot|camon|pop|moto|edge)\s*[-_]?\s*(\d{1,3}[a-z]?)\b", r"\1\2", t)
     t = re.sub(r"\b(s|a|m|f|c|g|x|v)\s*[-_]?\s*(\d{2})\s*(fe)\b", r"\1\2 \3", t)
     t = re.sub(r"\b([a-z]{1,3})\s*[-_]\s*(\d{2,4}[a-z]?)\b", r"\1\2", t)
@@ -1128,7 +1120,6 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
         elif len(tok) >= 3 and not tok.replace(".", "").isdigit():
             core_words.append(tok)
 
-    # ترتيب الموديلات بحيث يأتي الموديل الأقصر والأشهر أولاً (مثل a55 قبل sma556e)
     models = sorted(set(models), key=lambda x: (len(x), x))
     core_sorted = list(dict.fromkeys(core_words))[:5]
 
@@ -1143,15 +1134,15 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
         "net": net_tier
     }
 
+    # توسيع تعريف الهوية المحددة لتشمل أي منتج بماركة + (موديل أو كلمتين جوهريتين أو مواصفة) لزيادة المقارنات
     has_exact_id = bool(
         brand and (
             models
-            or (cat == "LAP" and core_sorted and cpu_family and (ram_vals or storage_vals))
-            or (cat in ("PERF", "GROC", "TOOLS", "WATCH", "APPL") and core_sorted and (vol_weight_specs or len(core_sorted) >= 2))
+            or (len(core_sorted) >= 2)
+            or (core_sorted and (vol_weight_specs or inch_vals or storage_vals or cpu_family))
         )
     )
 
-    # بناء مفاتيح فهرسة مرنة متعددة (Multi-Key Lookup) لربط a55 مع a55 + sma556e فوراً!
     lookup_keys: List[str] = []
     if has_exact_id:
         primary_model = models[0] if models else "-".join(core_sorted[:2])
@@ -1162,7 +1153,6 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
             lookup_keys.append(f"{cat}|{brand}|{primary_model}")
 
         variant_key = f"{cat}|{brand}|{primary_model}|{specs_dict['tiers']}|{specs_dict['storage']}|{specs_dict['inch']}|{specs_dict['vw']}|{specs_dict['cpu']}|{specs_dict['gpu']}"
-        # بناء استعلام بحث نظيف للتحقق المباشر من المنافسين
         q_parts = [brand, primary_model]
         if specs_dict["tiers"]:
             q_parts.append(specs_dict["tiers"].replace("-", " "))
@@ -1204,46 +1194,37 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
 
 
 def specs_are_compatible(s1: Dict[str, str], s2: Dict[str, str], cat: str) -> bool:
-    """فحص التطابق الصارم للمواصفات لمنع مقارنة نسخة عادية بنسخة Pro أو سعة بسعة مختلفة."""
-    # 1. الفئة الفرعية (Pro / Ultra / Max / Plus / FE / Lite / Mini) يجب أن تتطابق تماماً!
     if s1.get("tiers", "") != s2.get("tiers", ""):
         return False
 
-    # 2. شبكة 4G مقابل 5G لو ذُكرت في الاثنين
     n1, n2 = s1.get("net", ""), s2.get("net", "")
     if n1 and n2 and n1 != n2:
         return False
 
-    # 3. سعة التخزين في الهواتف واللابتوبات يجب أن تتطابق
     st1, st2 = s1.get("storage", ""), s2.get("storage", "")
-    if cat in ("MOB", "LAP"):
-        if st1 != st2:
-            return False
+    if cat in ("MOB", "LAP") and st1 and st2 and st1 != st2:
+        return False
     elif st1 and st2 and st1 != st2:
         return False
 
-    # 4. الرام: لو ذُكر في الاثنين يجب أن يتطابق، ولو أغفله متجر واحد يُسمح بالمطابقة
     r1, r2 = s1.get("ram", ""), s2.get("ram", "")
     if r1 and r2 and r1 != r2:
         return False
 
-    # 5. المعالج وكارت الشاشة في اللابتوبات
     if cat == "LAP":
         c1, c2 = s1.get("cpu", ""), s2.get("cpu", "")
-        if c1 != c2:
+        if c1 and c2 and c1 != c2:
             return False
         g1, g2 = s1.get("gpu", ""), s2.get("gpu", "")
-        if g1 != g2:
+        if g1 and g2 and g1 != g2:
             return False
 
-    # 6. مقاس الشاشة في التلفزيونات
     i1, i2 = s1.get("inch", ""), s2.get("inch", "")
-    if cat == "TV" and i1 != i2:
+    if cat == "TV" and i1 and i2 and i1 != i2:
         return False
     if i1 and i2 and i1 != i2:
         return False
 
-    # 7. الحجم/الوزن في العطور والبقالة (مثلاً 100ml لا يقارن بـ 50ml)
     v1, v2 = s1.get("vw", ""), s2.get("vw", "")
     if cat in ("PERF", "GROC") and (v1 and v2 and v1 != v2):
         return False
@@ -1251,9 +1232,9 @@ def specs_are_compatible(s1: Dict[str, str], s2: Dict[str, str], cat: str) -> bo
     return True
 
 
-# ================= الجلب المتوازي مع منظم السرعة =================
+# ================= الجلب المتوازي ومعالجة حجب جوميا =================
 
-def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
+def is_blocked_page(text: str, status: int, is_amazon: bool = False, store_id: str = "") -> bool:
     if not text:
         return True
     if status in (403, 429, 503) and len(text) < 25000:
@@ -1268,6 +1249,9 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
             return True
         if "data-asin" not in text and "/dp/" not in text:
             return True
+    elif store_id == "jumia":
+        if len(text) < 2500 and "prd" not in text:
+            return True
     elif len(text) < 1500:
         return True
 
@@ -1277,13 +1261,15 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False) -> bool:
 
 
 def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: bool = False) -> str:
-    sem = _DOMAIN_SEMAPHORES[store_id]
+    sem = get_domain_semaphore(store_id)
     with sem:
-        time.sleep(random.uniform(0.15, 0.45) if fast_mode else random.uniform(0.25, 0.55))
+        sleep_range = (0.6, 1.3) if store_id == "jumia" else ((0.15, 0.4) if fast_mode else (0.25, 0.55))
+        time.sleep(random.uniform(*sleep_range))
+
         base_headers = {
             "Accept-Language": AR_LANG,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Referer": "https://www.google.com.eg/",
+            "Referer": "https://www.jumia.com.eg/" if store_id == "jumia" else "https://www.google.com.eg/",
             "Cache-Control": "no-cache",
             "Upgrade-Insecure-Requests": "1",
             "User-Agent": random.choice(UA_LIST)
@@ -1292,27 +1278,30 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
             base_headers["Cookie"] = "i18n-prefs=EGP; lc-acbamo=ar_AE"
 
         if HAS_CFFI:
-            fps = ["safari17_0", "chrome120", "chrome116", "edge101"]
+            fps = ["chrome120", "safari17_0", "chrome116", "edge101"]
             random.shuffle(fps)
-            for fp in fps[:2 if fast_mode else 3]:
+            attempts = 2 if fast_mode else (4 if store_id == "jumia" else 3)
+            for fp in fps[:attempts]:
                 try:
                     sess = cffi_requests.Session(impersonate=fp)
-                    r = sess.get(url, headers=base_headers, timeout=9 if fast_mode else 11)
-                    if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
+                    r = sess.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
+                    if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
                         return r.text
                 except Exception:
                     pass
 
         if HAS_CLOUDSCRAPER:
-            try:
-                local_scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-                r = local_scraper.get(url, headers=base_headers, timeout=9 if fast_mode else 11)
-                if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon):
-                    return r.text
-            except Exception:
-                pass
+            cs_tries = 2 if store_id == "jumia" else 1
+            for _ in range(cs_tries):
+                try:
+                    local_scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+                    r = local_scraper.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
+                    if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
+                        return r.text
+                except Exception:
+                    pass
 
-        if fast_mode:
+        if fast_mode and store_id != "jumia":
             return ""
 
         sep_cb = "&" if "?" in url else "?"
@@ -1332,7 +1321,7 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
                 r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=14) if HAS_CFFI else requests.get(purl, headers=h, timeout=14)
                 if r.status_code != 200 or not r.text:
                     continue
-                if not is_blocked_page(r.text, 200, is_amazon=is_amazon):
+                if not is_blocked_page(r.text, 200, is_amazon=is_amazon, store_id=store_id):
                     return r.text
             except Exception:
                 continue
@@ -1416,7 +1405,6 @@ def extract_amazon_items(html_text: str, custom_blocked: Set[str], custom_bigram
             reviews = safe_int(m_rev.group(1).replace(",", ""))
 
         has_event_badge = bool(_EVENT_BADGE_RE.search(card_text))
-
         m_coup = _REAL_COUPON_CODE_RE.search(card_text)
         coupon_txt = m_coup.group(0).strip() if m_coup else ""
         net_cur = compute_net_coupon_price(cur, coupon_txt)
@@ -1556,10 +1544,10 @@ def extract_jumia_items(html_text: str, custom_blocked: Set[str], custom_bigrams
     seen_links = set()
     soup = BeautifulSoup(html_text, "html.parser")
 
-    cards = soup.select("article.prd, div.sku, article.c-prd")
+    cards = soup.select("article.prd, div.sku, article.c-prd, a.core")
     for card in cards:
-        a = card.find("a", href=True)
-        if not a or not a["href"].strip():
+        a = card if card.name == "a" else card.find("a", href=True)
+        if not a or not a.get("href", "").strip():
             continue
         link = urllib.parse.urljoin("https://www.jumia.com.eg", a["href"].strip()).split("?")[0]
         if link in seen_links:
@@ -1567,20 +1555,20 @@ def extract_jumia_items(html_text: str, custom_blocked: Set[str], custom_bigrams
 
         _strip_installment_nodes(card)
 
-        name_el = card.select_one("h3.name, div.name, h2.name")
-        title = clean_title(name_el.get_text(" ", strip=True) if name_el else (a.get("title") or ""))
+        name_el = card.select_one("h3.name, div.name, h2.name, [class*='name']")
+        title = clean_title(name_el.get_text(" ", strip=True) if name_el else (a.get("title") or a.get("aria-label") or ""))
         if len(title) < 5 or has_installment_or_blocked(title, custom_blocked, custom_bigrams):
             continue
 
-        prc_el = card.select_one("div.prc, span.prc")
-        old_el = card.select_one("div.old, span.old")
+        prc_el = card.select_one("div.prc, span.prc, [class*='prc']")
+        old_el = card.select_one("div.old, span.old, [class*='old']")
 
         cur = parse_price(prc_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if prc_el else 0
         old = parse_price(old_el.get_text(" ", strip=True), custom_blocked, explicit_egp=True) if old_el else 0
 
         rating = 0.0
         reviews = 0
-        rev_el = card.select_one("div.rev")
+        rev_el = card.select_one("div.rev, [class*='rev']")
         if rev_el:
             rev_txt = rev_el.get_text(" ", strip=True).translate(_TRANS)
             m_rt = re.search(r"([1-5](?:[.,]\d)?)\s*out\s*of\s*5", rev_txt, re.I)
@@ -1657,7 +1645,7 @@ def extract_general_items(html_text: str, base_domain: str, custom_blocked: Set[
     return items
 
 
-# ================= محرك التحقق المباشر من المنافسين قبل الإرسال (Live Cross-Store Verifier) =================
+# ================= التحقق المباشر عبر المنافسين + فحص أسعار جوجل =================
 
 def _live_search_store(target_store: str, query: str) -> List[dict]:
     cache_key = (target_store, query.lower())
@@ -1667,7 +1655,7 @@ def _live_search_store(target_store: str, query: str) -> List[dict]:
 
     enc_q = urllib.parse.quote_plus(query)
     if target_store == "noon":
-        url = f"https://www.noon.com/egypt-ar/search/?q={enc_q}&limit=20"
+        url = f"https://www.noon.com/egypt-ar/search/?q={enc_q}&limit=24"
         html_txt = smart_fetch(url, "noon", is_amazon=False, fast_mode=True)
         res = extract_noon_items(html_txt, set(), set()) if html_txt else []
     else:
@@ -1676,7 +1664,7 @@ def _live_search_store(target_store: str, query: str) -> List[dict]:
         res = extract_amazon_items(html_txt, set(), set()) if html_txt else []
 
     enriched = []
-    for item in res[:18]:
+    for item in res[:20]:
         ident = analyze_product_identity(item["title"])
         item["brand"] = ident["brand"]
         item["category"] = ident["category"]
@@ -1691,16 +1679,44 @@ def _live_search_store(target_store: str, query: str) -> List[dict]:
     return enriched
 
 
-def live_verify_candidate(cand: dict) -> Tuple[int, str, str]:
+def _google_lowest_price_egp(query: str, cur_price: int) -> int:
+    """فحص سريع لأسعار المنتج في جوجل (EGP) لاكتشاف وجود سعر أقل في متاجر أخرى."""
+    key = query.lower().strip()
+    if len(key) < 4:
+        return 0
+    with _LIVE_CACHE_LOCK:
+        if key in _GOOGLE_PRICE_CACHE:
+            return _GOOGLE_PRICE_CACHE[key]
+
+    q_egp = urllib.parse.quote_plus(f"{query} جنيه مصر")
+    url = f"https://html.duckduckgo.com/html/?q={q_egp}"
+    found_prices: List[int] = []
+    try:
+        h = {"User-Agent": random.choice(UA_LIST), "Accept-Language": AR_LANG}
+        r = cffi_requests.get(url, headers=h, impersonate="chrome120", timeout=10) if HAS_CFFI else requests.get(url, headers=h, timeout=10)
+        if r.status_code == 200 and r.text:
+            txt = r.text.translate(_TRANS)
+            for m in _CUR_PRICE_RE.finditer(txt):
+                raw = (m.group(1) or m.group(2) or "").replace(",", "")
+                p = safe_int(raw)
+                if cur_price * 0.45 <= p <= cur_price * 1.30:
+                    found_prices.append(p)
+    except Exception:
+        pass
+
+    lowest_g = min(found_prices) if found_prices else 0
+    with _LIVE_CACHE_LOCK:
+        _GOOGLE_PRICE_CACHE[key] = lowest_g
+    return lowest_g
+
+
+def live_verify_candidate(cand: dict) -> Tuple[int, str, str, int]:
     """
-    التحقق المباشر الحي من سعر نفس المنتج في المتجر المنافس الرئيسي قبل إرسال التنبيه:
-    - لو العرض من أمازون -> يبحث عنه فوراً في نون.
-    - لو العرض من نون أو أي متجر آخر -> يبحث عنه فوراً في أمازون (ونون لو العرض ليس من نون).
-    يُرجع: (أقل سعر مطابق لدى المنافس، اسم المتجر المنافس، رابط المنافس).
+    يرجع: (أقل سعر مطابق لدى المنافس المباشر، اسم المتجر المنافس، رابط المنافس، أقل سعر مرصود في جوجل)
     """
     query = cand.get("search_query", "").strip()
     if len(query) < 4:
-        return (0, "", "")
+        return (0, "", "", 0)
 
     my_canon = cand.get("canonical_seller", "")
     targets = ["noon"] if my_canon == "amazon" else (["amazon"] if my_canon == "noon" else ["amazon", "noon"])
@@ -1720,7 +1736,6 @@ def live_verify_candidate(cand: dict) -> Tuple[int, str, str]:
         results = _live_search_store(t_store, query)
         for item in results:
             p = item["price"]
-            # حماية ضد مقارنة إكسسوار رخيص بجهاز غالٍ
             if not (cur_p * 0.45 <= p <= cur_p * 2.25):
                 continue
             if item["category"] != cand_cat:
@@ -1737,7 +1752,7 @@ def live_verify_candidate(cand: dict) -> Tuple[int, str, str]:
             elif cand_tokens and item.get("core_tokens"):
                 overlap = len(cand_tokens & item["core_tokens"])
                 union = len(cand_tokens | item["core_tokens"])
-                if union > 0 and (overlap / union) >= 0.55 and overlap >= 2:
+                if union > 0 and (overlap / union) >= 0.50 and overlap >= 2:
                     matched = True
 
             if matched:
@@ -1746,10 +1761,11 @@ def live_verify_candidate(cand: dict) -> Tuple[int, str, str]:
                     best_comp_store = t_store
                     best_comp_link = item["link"]
 
-    return (best_comp_price, best_comp_store, best_comp_link)
+    google_p = _google_lowest_price_egp(query, cur_p) if cand.get("exact_model") else 0
+    return (best_comp_price, best_comp_store, best_comp_link, google_p)
 
 
-# ================= سجل الأسعار وذاكرة الموديل والتعلم التلقائي الصامت =================
+# ================= سجل الأسعار وذاكرة الموديل =================
 
 def update_and_get_model_baseline(rules: dict, variant_key: str, cur_price: int, exact_model: bool, now: int) -> int:
     if not exact_model or not variant_key or cur_price < MIN_PRODUCT_PRICE_GLOBAL:
@@ -1762,7 +1778,7 @@ def update_and_get_model_baseline(rules: dict, variant_key: str, cur_price: int,
         if old_med > 0:
             new_med = int(round((old_med * min(cnt, 10) + cur_price) / (min(cnt, 10) + 1)))
             baselines[variant_key] = {"med": new_med, "cnt": min(150, cnt + 1), "ts": now}
-            return old_med if cnt >= 3 else 0
+            return old_med if cnt >= 2 else 0
     baselines[variant_key] = {"med": cur_price, "cnt": 1, "ts": now}
     return 0
 
@@ -1776,7 +1792,6 @@ def record_and_analyze_history(
     cur_price: int,
     now: int
 ) -> Dict[str, Any]:
-    # التعلم التلقائي الصامت: لو ارتفع سعر صفقة أرسلناها خلال آخر 14 يوماً بنسبة >= 10% -> تأكد أنها كانت صفقة حقيقية!
     prev_sent = state.get(deal_hash)
     if isinstance(prev_sent, dict) and not prev_sent.get("auto_rewarded"):
         sent_price = safe_int(prev_sent.get("price"))
@@ -1795,7 +1810,6 @@ def record_and_analyze_history(
             if st_canon:
                 rules.setdefault("store_discount_modifiers", {})[st_canon] = max(-3, rules.get("store_discount_modifiers", {}).get(st_canon, 0) - 1)
             rules.setdefault("stats", {})["auto_verified_wins"] = safe_int(rules.get("stats", {}).get("auto_verified_wins")) + 1
-            log(f"🎯 توثيق تلقائي: ارتفع سعر [{prev_sent.get('title', '')[:30]}] من {sent_price} إلى {cur_price} ج.م!")
 
     rec = history.get(clean_link)
     daily_buckets: Dict[int, Tuple[int, int]] = {}
@@ -1823,9 +1837,9 @@ def record_and_analyze_history(
     obs_30 = len(sorted_pts_30)
     span_days_30 = ((sorted_pts_30[-1][0] - sorted_pts_30[0][0]) // DAY) if obs_30 >= 2 else 0
 
-    if obs_30 >= 6 and span_days_30 >= 7:
+    if obs_30 >= 5 and span_days_30 >= 5:
         strength = "strong"
-    elif obs_30 >= 3 and span_days_30 >= 3:
+    elif obs_30 >= 3 and span_days_30 >= 2:
         strength = "medium"
     elif obs_30 >= 2 and span_days_30 >= 1:
         strength = "weak"
@@ -1848,7 +1862,7 @@ def record_and_analyze_history(
     return stats
 
 
-# ================= محرك التقييم الصارم (Zero-Trust Strikethrough Engine) =================
+# ================= محرك التقييم الصارم (لا يُرسل عرض غير موثق!) =================
 
 CATEGORY_LABELS_AR = {
     "GROC": "🛒 بقالة وسوبرماركت",
@@ -1886,19 +1900,18 @@ def evaluate_deal_strict(
     """
     ترجع: (هل مقبول؟, نوع الصفقة, السعر المرجعي, نسبة التوفير, درجة الثقة, سبب الرفض, هل يحتاج تحقق مباشر؟)
     """
-    if 0.1 <= rating < 3.6:
+    if 0.1 <= rating < 3.7:
         return (False, "", 0, 0, 0, "low_product_rating", False)
 
-    # رفض المنتجات المجهولة/الجينيريك التي ليس لها ماركة ولا تقييمات قوية
-    if is_generic_product(title, brand) and not (reviews >= 20 and rating >= 4.2):
+    if is_generic_product(title, brand) and not (reviews >= 25 and rating >= 4.2):
         return (False, "", 0, 0, 0, "generic_unbranded_junk", False)
 
     if cat == "GROC":
-        min_price_cat, min_saving = 40, 20
+        min_price_cat, min_saving = 50, 25
     elif cat in ("PERF", "FASH", "TOOLS", "WATCH"):
-        min_price_cat, min_saving = 85, 50
+        min_price_cat, min_saving = 100, 60
     else:
-        min_price_cat, min_saving = 120, 120
+        min_price_cat, min_saving = 150, 150
 
     if cur < min_price_cat:
         return (False, "", 0, 0, 0, "below_min_price", False)
@@ -1909,95 +1922,79 @@ def evaluate_deal_strict(
     strength = str(h_stats.get("history_strength") or "none")
 
     has_competitor = market_lowest_other > 0
-    # لو يوجد منافس أرخص أو بفارق تافه (< 4%) -> رفض فوري!
-    if has_competitor and market_lowest_other <= cur * 1.03:
+    if has_competitor and market_lowest_other <= cur * 1.04:
         return (False, "", 0, 0, 0, "competitor_is_cheaper_or_equal", False)
 
-    has_market_proof = has_competitor and (cur * 1.06 <= market_lowest_other <= cur * 1.95)
+    has_market_proof = has_competitor and (cur * 1.07 <= market_lowest_other <= cur * 1.90)
     has_strong_history = strength in ("strong", "medium") and median_30d > 0 and obs_days_30d >= 3
 
     rating_bonus = 5 if (rating >= 4.3 and reviews >= 15) else (3 if (rating >= 4.0 and reviews >= 6) else 0)
     c_extra = (4 if brand_liked else 0) + min(4, max(-3, cat_bonus)) + rating_bonus
 
-    # 1. المسار الأول الأقوى: أرخص فعلياً من المنافسين (تم إثباته من السوق)
+    # 1. أرخص فعلياً من المنافسين (أقوى دليل)
     if has_market_proof:
         gap_pct = round((market_lowest_other - cur) / market_lowest_other * 100)
         saving = market_lowest_other - cur
-        if gap_pct >= 6 and (saving >= min_saving or cur < 800):
-            # تأكد أيضاً أن السعر الحالي ليس أعلى من تاريخه الخاص
-            if median_30d > 0 and cur > median_30d * 1.05:
+        if gap_pct >= 7 and (saving >= min_saving or cur < 800):
+            if median_30d > 0 and cur > median_30d * 1.03:
                 return (False, "", 0, 0, 0, "above_own_history_median", False)
-            c_score = min(99, 62 + min(22, gap_pct) + (10 if has_strong_history else 0) + c_extra)
+            c_score = min(99, 66 + min(22, gap_pct) + (8 if has_strong_history else 0) + c_extra)
             if c_score >= MIN_CONF_VERIFIED:
-                return (True, "أرخص من المنافسين", market_lowest_other, gap_pct, c_score, "ok", False)
+                return (True, "أرخص من المنافسين", market_lowest_other, gap_pct, c_score, "ok", True)
 
-    # 2. المسار الثاني: هبوط تاريخي حقيقي موثق في الذاكرة (3+ أيام رصد منفصلة)
+    # 2. هبوط تاريخي موثق في الذاكرة (3+ أيام رصد منفصلة) + تحقق مباشر
     if has_strong_history and median_30d > cur and (min_30d == 0 or cur <= min_30d):
         drop_pct = round((median_30d - cur) / median_30d * 100)
         saving = median_30d - cur
-        if 9 <= drop_pct <= 60 and (saving >= min_saving or drop_pct >= 12):
-            c_score = min(97, 58 + min(20, drop_pct) + (8 if strength == "strong" else 4) + c_extra)
+        if 10 <= drop_pct <= 55 and (saving >= min_saving or drop_pct >= 14):
+            c_score = min(96, 62 + min(18, drop_pct) + (7 if strength == "strong" else 4) + c_extra)
             if c_score >= MIN_CONF_VERIFIED:
                 return (True, "هبوط تاريخي صامت موثق", median_30d, drop_pct, c_score, "ok", True)
 
-    # 3. المسار الثالث: أرخص من متوسط سعر الموديل في الذاكرة السوقية
-    if exact_model and model_baseline_med >= cur * 1.12:
+    # 3. أقل من متوسط سعر الموديل في الذاكرة السوقية + تحقق مباشر
+    if exact_model and model_baseline_med >= cur * 1.14:
         drop_pct = round((model_baseline_med - cur) / model_baseline_med * 100)
         saving = model_baseline_med - cur
-        if 11 <= drop_pct <= 55 and saving >= min_saving:
-            c_score = min(92, 58 + min(18, drop_pct) + c_extra)
+        if 13 <= drop_pct <= 50 and saving >= min_saving:
+            c_score = min(92, 60 + min(16, drop_pct) + c_extra)
             if c_score >= MIN_CONF_VERIFIED:
                 return (True, "أقل من متوسط سعر السوق للموديل", model_baseline_med, drop_pct, c_score, "ok", True)
 
-    # 4. المسار الرابع المقيد: عروض الفعاليات/الكوبونات للماركات المعروفة فقط (تُرسل أولاً للتحقق المباشر!)
-    # نرفض تماماً الخصم المشطوب الأعمى! لابد من (ماركة معروفة) + (شارة فعالية أو كوبون أو تقييمات قوية)
+    # 4. أي عرض يعتمد على السعر المشطوب يُرسل فقط للتحقق المباشر الحي أولاً (ولا يُقبل إلا إذا أثبته التحقق المباشر أو التاريخ!)
     if old > cur:
-        if median_30d > 0 and cur > median_30d * 1.02:
+        if median_30d > 0 and cur > median_30d * 1.01:
             return (False, "", 0, 0, 0, "fake_inflated_old_price", False)
-
-        effective_old = int(median_30d * 1.06) if (median_30d > 0 and old > median_30d * 1.20) else old
+        effective_old = int(median_30d * 1.05) if (median_30d > 0 and old > median_30d * 1.18) else old
         if effective_old <= cur:
             return (False, "", 0, 0, 0, "fake_inflated_old_price", False)
-
         disc = round((effective_old - cur) / effective_old * 100)
         saving = effective_old - cur
-        if disc > MAX_REALISTIC_DISC:
-            return (False, "", 0, 0, 0, "unrealistic_discount_pct", False)
-
-        # أي خصم معلن غير موثق فوق 55% يُرفض لأنه في الغالب سعر مشطوب مضخم
-        if disc > 55:
-            return (False, "", 0, 0, 0, "suspicious_unverified_high_disc", False)
-
-        min_disc_req = max(16, 18 + store_disc_mod)
-        has_quality_signal = bool(has_coupon or has_event_badge or (rating >= 4.1 and reviews >= 10))
-
-        if brand and has_quality_signal and disc >= min_disc_req and saving >= min_saving:
-            c_score = min(74, 48 + min(14, disc // 2) + (6 if has_coupon else 0) + (5 if has_event_badge else 0) + c_extra)
-            if c_score >= MIN_CONF_EVENT_FALLBACK:
-                return (True, "مرشح فعالية/كوبون (قيد التحقق المباشر)", effective_old, disc, c_score, "ok", True)
-
-        return (False, "", 0, 0, 0, "rejected_unverified_strikethrough", False)
+        if disc > MAX_REALISTIC_DISC or disc > 55:
+            return (False, "", 0, 0, 0, "unrealistic_or_inflated_disc", False)
+        min_disc_req = max(18, 20 + store_disc_mod)
+        if brand and exact_model and disc >= min_disc_req and saving >= min_saving:
+            c_score = min(82, 56 + min(14, disc // 2) + (5 if has_coupon else 0) + (4 if has_event_badge else 0) + c_extra)
+            return (True, "مرشح خصم (يشترط إثبات مباشر)", effective_old, disc, c_score, "ok", True)
 
     return (False, "", 0, 0, 0, "no_real_proof", False)
 
 
-# ================= مراكز الفعاليات الموسمية (الجمعة البيضاء/الصفراء/البلاك فرايدي) =================
+# ================= بناء الروابط وتوسيع الاستكشاف =================
 
 SINGLE_KEYWORD_POOLS: Dict[str, List[str]] = {
-    "GROC": ["نسكافيه", "قهوة", "زيت كريستال", "اريال", "برسيل", "داوني", "فيري", "شاي ليبتون", "عسل نحل", "حفاضات بامبرز"],
-    "PERF": ["lattafa perfume", "armaf perfume", "afnan perfume", "rasasi perfume", "عطر رجالي اصلي", "لوريال سيروم", "نيفيا", "ماكينة حلاقة براون"],
-    "WATCH": ["casio watch", "seiko watch", "citizen watch", "fossil watch", "huawei watch", "xiaomi band"],
-    "FASH": ["adidas shoes", "nike shoes", "skechers", "puma shoes", "defacto", "شنطة ظهر لابتوب"],
-    "TOOLS": ["شنيور بوش", "شنيور توتال", "شنيور انجكو", "طقم عدة ستانلي", "غسالة ضغط كارتشر", "منفاخ اطارات سيارة"],
-    "MOB": ["samsung galaxy a55", "samsung galaxy s24", "iphone 15", "iphone 16", "xiaomi redmi note 13", "realme", "oppo reno", "anker powerbank", "soundcore"],
-    "LAP": ["laptop lenovo", "laptop hp", "laptop dell", "laptop asus", "macbook air", "logitech mouse"],
-    "TV": ["شاشة سامسونج سمارت", "شاشة ال جي 4k", "شاشة توشيبا", "شاشة شارب", "شاشة تورنيدو"],
+    "GROC": ["نسكافيه", "قهوة", "زيت كريستال", "اريال", "برسيل", "داوني", "فيري", "شاي ليبتون", "عسل نحل", "حفاضات بامبرز", "تونة", "مكرونة"],
+    "PERF": ["lattafa perfume", "armaf perfume", "afnan perfume", "rasasi perfume", "عطر رجالي اصلي", "لوريال سيروم", "نيفيا", "ماكينة حلاقة براون", "عطر نسائي"],
+    "WATCH": ["casio watch", "seiko watch", "citizen watch", "fossil watch", "huawei watch", "xiaomi band", "ساعة يد رجالي"],
+    "FASH": ["adidas shoes", "nike shoes", "skechers", "puma shoes", "defacto", "شنطة ظهر لابتوب", "كوتشي رجالي"],
+    "TOOLS": ["شنيور بوش", "شنيور توتال", "شنيور انجكو", "طقم عدة ستانلي", "غسالة ضغط كارتشر", "منفاخ اطارات سيارة", "صاروخ كهربائي"],
+    "MOB": ["samsung galaxy a55", "samsung galaxy s24", "iphone 15", "iphone 16", "xiaomi redmi note 13", "realme", "oppo reno", "anker powerbank", "soundcore", "poco"],
+    "LAP": ["laptop lenovo", "laptop hp", "laptop dell", "laptop asus", "macbook air", "logitech mouse", "lenovo loq", "hp victus"],
+    "TV": ["شاشة سامسونج سمارت", "شاشة ال جي 4k", "شاشة توشيبا", "شاشة شارب", "شاشة تورنيدو", "شاشة 55 بوصة"],
     "APPL": ["قلاية هوائية فيليبس", "قلاية هوائية تيفال", "ميكروويف شارب", "خلاط مولينكس", "مكنسة كهربائية", "مكواة بخار تيفال", "تكييف كاريير"]
 }
 
 
-def _next_page_bounded(cursors: Dict[str, int], cursor_key: str, max_page: int = 4) -> Tuple[int, int]:
-    """تدوير الصفحات داخل النطاق الذهبي (1 إلى 4) حيث تتركز عروض الفعاليات الحقيقية."""
+def _next_page_bounded(cursors: Dict[str, int], cursor_key: str, max_page: int = 7) -> Tuple[int, int]:
     cur_p = safe_int(cursors.get(cursor_key), default=1)
     if cur_p < 1 or cur_p > max_page:
         cur_p = 1
@@ -2013,7 +2010,7 @@ def _select_evolving_keywords(pool: List[str], kw_scores: Dict[str, int], count:
     scored = []
     for idx, kw in enumerate(pool):
         base_score = kw_scores.get(kw, 0)
-        explore_wave = ((idx + run_counter * 2) % len(pool)) * 0.5
+        explore_wave = ((idx + run_counter * 3) % len(pool)) * 0.7
         scored.append((base_score + explore_wave + random.uniform(0, 1.5), kw))
     scored.sort(key=lambda x: x[0], reverse=True)
     return [kw for _, kw in scored[:count]]
@@ -2025,14 +2022,12 @@ def build_dynamic_stores(rules: dict) -> List[dict]:
     cursors = rules.setdefault("page_cursors", {})
     kw_scores = rules.setdefault("keyword_scores", {})
 
-    # استخدام ترتيبات عالية الجودة فقط (الأكثر مبيعاً / المميزة / الأعلى تقييماً) وإلغاء price-asc-rank
     amz_sorts = ["exact-aware-popularity-rank", "featured", "review-rank"]
     amz_sort = amz_sorts[run_counter % len(amz_sorts)]
     noon_sort = "sort[by]=popularity&sort[dir]=desc" if run_counter % 2 == 0 else "sort[by]=discount&sort[dir]=desc"
 
-    log(f"🧭 جولة الفعاليات والتحقق المباشر #{run_counter} | ترتيب أمازون=({amz_sort}) | نون=({noon_sort.split('&')[0]})")
+    log(f"🧭 جولة التحقق الصارم #{run_counter} | ترتيب أمازون=({amz_sort}) | نون=({noon_sort.split('&')[0]})")
 
-    # 1. مراكز الفعاليات وعروض اليوم في أمازون (الجمعة البيضاء / صفقات اليوم / خصم 15%+)
     amazon_urls: List[Tuple[str, str, str]] = [
         ("https://www.amazon.eg/s?rh=p_n_deal_type%3A26901099031&page=1&language=ar_AE", "GEN", "amz_lightning"),
         ("https://www.amazon.eg/s?rh=p_n_deal_type%3A26901099031&page=2&language=ar_AE", "GEN", "amz_lightning"),
@@ -2052,7 +2047,7 @@ def build_dynamic_stores(rules: dict) -> List[dict]:
         ("amz_tools_wf", "https://www.amazon.eg/s?i=hi&rh=p_n_deal_type%3A26901098031", "TOOLS")
     ]
     for c_key, base_u, cat_code in amz_cat_bases:
-        p1, p2 = _next_page_bounded(cursors, c_key, max_page=4)
+        p1, p2 = _next_page_bounded(cursors, c_key, max_page=7)
         amazon_urls.append((f"{base_u}&s={amz_sort}&page={p1}&language=ar_AE", cat_code, c_key))
         amazon_urls.append((f"{base_u}&s=featured&page={p2}&language=ar_AE", cat_code, c_key))
 
@@ -2062,7 +2057,6 @@ def build_dynamic_stores(rules: dict) -> List[dict]:
             enc_kw = urllib.parse.quote_plus(kw)
             amazon_urls.append((f"https://www.amazon.eg/s?k={enc_kw}&rh=p_n_pct-off-with-tax%3A10-&s={amz_sort}&page=1&language=ar_AE", cat_code, kw))
 
-    # 2. مراكز فعاليات نون مصر (الجمعة الصفراء + الصفقات اليومية + الأقسام)
     noon_urls: List[Tuple[str, str, str]] = [
         ("https://www.noon.com/egypt-ar/deals/?limit=50&page=1", "GEN", "noon_deals"),
         ("https://www.noon.com/egypt-ar/deals/?limit=50&page=2", "GEN", "noon_deals"),
@@ -2081,26 +2075,26 @@ def build_dynamic_stores(rules: dict) -> List[dict]:
         ("noon_tools", "https://www.noon.com/egypt-ar/tools-and-home-improvement/", "TOOLS")
     ]
     for c_key, base_u, cat_code in noon_cat_bases:
-        p1, p2 = _next_page_bounded(cursors, c_key, max_page=4)
+        p1, p2 = _next_page_bounded(cursors, c_key, max_page=7)
         noon_urls.append((f"{base_u}?{noon_sort}&limit=50&page={p1}", cat_code, c_key))
         noon_urls.append((f"{base_u}?sort[by]=popularity&sort[dir]=desc&limit=50&page={p2}", cat_code, c_key))
 
-    # 3. فعاليات جوميا مصر (البلاك فرايدي + الفلاش سيل + المتاجر الرسمية)
+    p_jm1, p_jm2 = _next_page_bounded(cursors, "store_jumia", max_page=5)
     jumia_urls: List[Tuple[str, str, str]] = [
-        ("https://www.jumia.com.eg/ar/flash-sales/?page=1", "GEN", "jum_flash"),
-        ("https://www.jumia.com.eg/ar/mlp-black-friday/?page=1", "GEN", "jum_bf"),
-        ("https://www.jumia.com.eg/ar/phones-tablets/?sort=popularity&page=1", "MOB", "jum_mob"),
-        ("https://www.jumia.com.eg/ar/computing/?sort=popularity&page=1", "LAP", "jum_lap"),
-        ("https://www.jumia.com.eg/ar/home-office-appliances/?sort=popularity&page=1", "APPL", "jum_appl"),
-        ("https://www.jumia.com.eg/ar/groceries/?sort=popularity&page=1", "GROC", "jum_groc"),
-        ("https://www.jumia.com.eg/ar/health-beauty/?sort=popularity&page=1", "PERF", "jum_perf"),
+        (f"https://www.jumia.com.eg/ar/flash-sales/?page={p_jm1}", "GEN", "jum_flash"),
+        (f"https://www.jumia.com.eg/ar/mlp-black-friday/?page={p_jm1}", "GEN", "jum_bf"),
+        (f"https://www.jumia.com.eg/ar/phones-tablets/?sort=popularity&page={p_jm1}", "MOB", "jum_mob"),
+        (f"https://www.jumia.com.eg/ar/computing/?sort=popularity&page={p_jm2}", "LAP", "jum_lap"),
+        (f"https://www.jumia.com.eg/ar/home-office-appliances/?sort=popularity&page={p_jm1}", "APPL", "jum_appl"),
+        (f"https://www.jumia.com.eg/ar/groceries/?sort=popularity&page={p_jm2}", "GROC", "jum_groc"),
+        (f"https://www.jumia.com.eg/ar/health-beauty/?sort=popularity&page={p_jm1}", "PERF", "jum_perf"),
         ("https://www.jumia.com.eg/ar/watches-sunglasses/?sort=popularity&page=1", "WATCH", "jum_watch"),
         ("https://www.jumia.com.eg/ar/home-improvement-tools/?sort=popularity&page=1", "TOOLS", "jum_tools")
     ]
 
-    p_2b1, p_2b2 = _next_page_bounded(cursors, "store_2b", max_page=4)
-    p_ran1, p_ran2 = _next_page_bounded(cursors, "store_raneen", max_page=4)
-    p_drm1, p_drm2 = _next_page_bounded(cursors, "store_dream", max_page=4)
+    p_2b1, p_2b2 = _next_page_bounded(cursors, "store_2b", max_page=7)
+    p_ran1, p_ran2 = _next_page_bounded(cursors, "store_raneen", max_page=7)
+    p_drm1, p_drm2 = _next_page_bounded(cursors, "store_dream", max_page=7)
 
     return [
         {"id": "amazon", "name": "أمازون مصر (Amazon)", "domain": "https://www.amazon.eg", "type": "amazon", "max_deals": MAX_DEALS_AMAZON, "urls": amazon_urls},
@@ -2110,6 +2104,7 @@ def build_dynamic_stores(rules: dict) -> List[dict]:
             "id": "2b", "name": "2B Egypt", "domain": "https://2b.com.eg", "type": "general", "max_deals": MAX_DEALS_OTHER,
             "urls": [
                 (f"https://2b.com.eg/ar/deals.html?p={p_2b1}", "GEN", "2b_deals"),
+                (f"https://2b.com.eg/ar/deals.html?p={p_2b2}", "GEN", "2b_deals"),
                 (f"https://2b.com.eg/ar/mobiles-tablets.html?p={p_2b1}", "MOB", "2b_mob"),
                 (f"https://2b.com.eg/ar/computers.html?p={p_2b1}", "LAP", "2b_lap"),
                 (f"https://2b.com.eg/ar/tvs.html?p={p_2b1}", "TV", "2b_tv"),
@@ -2121,7 +2116,8 @@ def build_dynamic_stores(rules: dict) -> List[dict]:
             "urls": [
                 (f"https://www.raneen.com/ar/deals?p={p_ran1}", "APPL", "ran_deals"),
                 (f"https://www.raneen.com/ar/deals?p={p_ran2}", "APPL", "ran_deals"),
-                ("https://www.raneen.com/ar/deals/appliances-electronics-offers", "APPL", "ran_elec")
+                ("https://www.raneen.com/ar/deals/appliances-electronics-offers", "APPL", "ran_elec"),
+                ("https://www.raneen.com/ar/deals/home-kitchen-offers", "APPL", "ran_kit")
             ]
         },
         {
@@ -2194,6 +2190,7 @@ def main() -> None:
     store_diag: Dict[str, dict] = {}
     total_sent = 0
     fake_caught_this_run = 0
+    google_caught_this_run = 0
     live_verified_wins = 0
     cat_sent_counter: Counter = Counter()
 
@@ -2207,10 +2204,8 @@ def main() -> None:
         store_modifiers = rules.get("store_discount_modifiers", {})
         kw_scores = rules.setdefault("keyword_scores", {})
 
-        # الاحتفاظ بسجل الصفقات المرسلة لمدة 14 يوماً كاملة لمنع أي تكرار وحفظ صلاحية أزرار تليجرام
         state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_DAYS * DAY}
 
-        # بناء فهرس بأقل سعر أُرسل لكل هوية منتج خلال آخر 14 يوماً
         sent_by_variant: Dict[str, int] = {}
         for rec in state.values():
             vk = rec.get("variant_key", "")
@@ -2234,7 +2229,7 @@ def main() -> None:
             for u_entry in st["urls"]:
                 tasks.append((st, u_entry[0], u_entry[1], u_entry[2]))
 
-        log(f"⚡ جاري مسح {len(tasks)} صفحة فعاليات ومتاجر بالتوازي عبر {MAX_WORKERS} مسارات...")
+        log(f"⚡ جاري مسح {len(tasks)} صفحة عبر {MAX_WORKERS} مسارات...")
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [executor.submit(_fetch_and_extract_task, t, custom_blocked, custom_bigrams) for t in tasks]
@@ -2250,7 +2245,6 @@ def main() -> None:
 
         log(f"📦 إجمالي السلع المستخرجة: {len(all_raw_items):,} سلعة.")
 
-        # 1. بناء الفهرس الحي داخل الجولة + تحديث ذاكرة السوق الدائمة (market_index.json)
         in_run_by_key = defaultdict(list)
         for it in all_raw_items:
             c_st = it.get("canonical_seller", "")
@@ -2267,7 +2261,6 @@ def main() -> None:
         for it in all_raw_items:
             items_by_store[it["sid"]].append(it)
 
-        # 2. مرحلة الفرز الأولي (توليد قائمة المرشحين الأقوياء قبل التحقق المباشر)
         pre_candidates: List[dict] = []
 
         for st in stores:
@@ -2294,7 +2287,6 @@ def main() -> None:
                     diag["reject_reasons"]["user_blocked"] += 1
                     continue
 
-                # منع التكرار الصارم لمدة 14 يوماً (بالرابط وبـهوية المنتج معاً)
                 prev_sent = state.get(deal_hash)
                 if prev_sent and it["price"] >= prev_sent.get("price", it["price"]) * REALERT_MIN_EXTRA_DROP_RATIO:
                     diag["reject_reasons"]["recently_sent_14d"] += 1
@@ -2308,7 +2300,6 @@ def main() -> None:
                 h_stats = record_and_analyze_history(history, state, rules, deal_hash, clean_link, it["price"], now)
                 model_baseline_med = update_and_get_model_baseline(rules, v_key, it["price"], it["exact_model"], now)
 
-                # البحث عن أقل سعر منافس (من الجولة الحالية + من ذاكرة الـ 10 أيام market_index)
                 lowest_other = 0
                 comp_store_id = ""
                 my_canon = it.get("canonical_seller", "")
@@ -2373,7 +2364,6 @@ def main() -> None:
                 it["live_verified"] = False
                 pre_candidates.append(it)
 
-        # دمج الألوان والمقاسات قبل التحقق المباشر لتوفير الوقت
         variant_groups: Dict[str, List[dict]] = defaultdict(list)
         for cand in pre_candidates:
             vk = f"{cand['sid']}|{cand.get('variant_key') or cand['clean_link']}"
@@ -2388,16 +2378,15 @@ def main() -> None:
 
         deduped_pool.sort(
             key=lambda x: (
-                not x["needs_live_verify"],
+                "يشترط إثبات مباشر" not in x["deal_type"],
                 x["conf_score"],
                 x["saving_pct"]
             ),
             reverse=True
         )
 
-        # 3. مرحلة التحقق المباشر الحي من المنافسين (Live Cross-Store Verification) لأفضل المرشحين!
         to_verify = deduped_pool[:MAX_LIVE_VERIFICATIONS]
-        log(f"🔎 جاري إجراء التحقق المباشر الحي من أسعار المنافسين لـ {len(to_verify)} مرشح قبل الإرسال...")
+        log(f"🔎 التحقق المباشر (منافسون + جوجل) لـ {len(to_verify)} مرشح...")
 
         final_verified: List[dict] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as v_exec:
@@ -2407,29 +2396,31 @@ def main() -> None:
                 sid = cand["sid"]
                 diag = store_diag[sid]
                 try:
-                    live_p, live_st, live_link = fut.result()
+                    live_p, live_st, live_link, google_p = fut.result()
                 except Exception:
-                    live_p, live_st, live_link = 0, "", ""
+                    live_p, live_st, live_link, google_p = 0, "", "", 0
+
+                # فحص سعر جوجل: لو وُجد سعر أرخص في جوجل -> رفض فوري
+                if google_p > 0 and google_p <= cand["price"] * 0.96:
+                    google_caught_this_run += 1
+                    diag["reject_reasons"]["cheaper_on_google"] += 1
+                    rules["stats"]["google_cheaper_caught"] = safe_int(rules["stats"].get("google_cheaper_caught")) + 1
+                    continue
 
                 if live_p > 0 and live_st:
-                    # تحديث ذاكرة السوق بالسعر الحي الجديد
                     if cand["exact_model"] and cand.get("variant_key"):
                         market_index.setdefault(cand["variant_key"], {})[live_st] = [live_p, now, live_link]
 
-                    # لو المنافس أرخص أو سعره قريب (الفرق أقل من 5%) -> إحباط العرض فوراً!
-                    if live_p <= cand["price"] * 1.04:
+                    if live_p <= cand["price"] * 1.05:
                         fake_caught_this_run += 1
                         diag["reject_reasons"]["caught_cheaper_on_competitor_live"] += 1
                         rules["stats"]["fake_caught_live"] = safe_int(rules["stats"].get("fake_caught_live")) + 1
-                        # معاقبة تلقائية للمتجر الذي ادّعى خصماً وهمياً
                         my_canon = cand.get("canonical_seller", "")
                         if my_canon and cand["old"] > cand["price"]:
                             store_modifiers[my_canon] = min(10, store_modifiers.get(my_canon, 0) + 1)
-                        log(f"🚫 إحباط عرض وهمي [{cand['store']}]: {cand['title'][:40]} بـ {cand['price']:,} ج.م بينما {CANONICAL_AR_NAMES.get(live_st, live_st)} يبيعه بـ {live_p:,} ج.م!")
                         continue
 
-                    # لو السعر الحالي فعلاً أرخص من المنافس المباشر بنسبة >= 6% -> ترقيته لصفقة مؤكدة بالتحقق المباشر!
-                    if live_p >= cand["price"] * 1.06:
+                    if live_p >= cand["price"] * 1.07:
                         gap_pct = round((live_p - cand["price"]) / live_p * 100)
                         cand["deal_type"] = "أرخص من المنافسين (تحقق مباشر)"
                         cand["ref_price"] = live_p
@@ -2437,36 +2428,29 @@ def main() -> None:
                         cand["lowest_other"] = live_p
                         cand["comp_store_id"] = live_st
                         cand["live_verified"] = True
-                        cand["conf_score"] = min(99, max(cand["conf_score"], 78 + min(18, gap_pct)))
+                        cand["conf_score"] = min(99, max(cand["conf_score"], 80 + min(18, gap_pct)))
                         live_verified_wins += 1
-                        # مكافأة نظيفة للكلمة البحثية التي أتت بصفقة مثبتة فعلياً
                         if cand.get("kw"):
                             kw_scores[cand["kw"]] = min(100, kw_scores.get(cand["kw"], 0) + 2)
                         diag["accepted"] += 1
                         final_verified.append(cand)
                         continue
 
-                # لم يُعثر على نفس المنتج عند المنافس أثناء البحث الحي:
-                # يُقبل فقط إذا كان مدعوماً بدليل قوي (تاريخ حقيقي أو متوسط سوق أو مقارن مسبق) أو ضمن حصة الفعاليات الصارمة
-                if "قيد التحقق المباشر" not in cand["deal_type"]:
+                # القبول بدون منافس مباشر مسموح فقط للتاريخ القوي أو متوسط السوق القوي (وليس لخصم مشطوب غير مثبت)
+                if "يشترط إثبات مباشر" not in cand["deal_type"]:
                     diag["accepted"] += 1
                     final_verified.append(cand)
                 else:
-                    # عرض فعالية/كوبون لماركة معروفة لم يثبت وجود منافس أرخص منه
-                    cand["deal_type"] = "عرض فعالية/كوبون لماركة معروفة"
-                    diag["accepted"] += 1
-                    final_verified.append(cand)
+                    diag["reject_reasons"]["unverified_discount_rejected"] += 1
 
         for st in stores:
             d = store_diag[st["id"]]
             top_r = ", ".join(f"{k}:{v}" for k, v in d["reject_reasons"].most_common(4)) or "لا يوجد"
-            log(f"📋 تشخيص [{st['name']}]: فريد={d['unique']} | موديل={d['exact_models']} | مقارن={d['cross_matched']} | مقبول نهائياً={d['accepted']} | استبعاد=({top_r})")
+            log(f"📋 تشخيص [{st['name']}]: فريد={d['unique']} | موديل={d['exact_models']} | مقارن={d['cross_matched']} | مقبول={d['accepted']} | استبعاد=({top_r})")
 
-        # 4. الترتيب النهائي وإرسال الصفوة فقط لتليجرام مع توازن الأقسام والمتاجر
         final_verified.sort(
             key=lambda x: (
                 x["live_verified"],
-                "فعالية/كوبون" not in x["deal_type"],
                 x["conf_score"],
                 x["saving_pct"]
             ),
@@ -2475,7 +2459,6 @@ def main() -> None:
 
         store_sent_counts: Counter = Counter()
         cat_sent_limits: Counter = Counter()
-        unverified_event_sent = 0
         sent_variant_in_run: Set[str] = set()
 
         for it in final_verified:
@@ -2490,10 +2473,6 @@ def main() -> None:
 
             item_cat = it.get("category", "GEN")
             if cat_sent_limits[item_cat] >= 6:
-                continue
-
-            is_event_fallback = ("فعالية/كوبون" in it["deal_type"])
-            if is_event_fallback and unverified_event_sent >= MAX_UNVERIFIED_EVENT_PER_RUN:
                 continue
 
             vk = it.get("variant_key", "")
@@ -2516,12 +2495,9 @@ def main() -> None:
             elif dtype == "هبوط تاريخي صامت موثق":
                 tag = f"📉 <b>هبوط سعر تاريخي موثق — {htmllib.escape(it['store'])}</b>"
                 ref_txt = f"🏷 وسيط السعر ({obs_d} أيام رصد): {it['ref_price']:,} ج.م (نزل {it['saving_pct']}% — وفر {saving:,} ج.م)"
-            elif dtype == "أقل من متوسط سعر السوق للموديل":
+            else:
                 tag = f"✅ <b>أقل من متوسط السوق — {htmllib.escape(it['store'])}</b>"
                 ref_txt = f"🏷 متوسط سعر الموديل بالسوق: {it['ref_price']:,} ج.م (توفير {saving:,} ج.م — {it['saving_pct']}%)"
-            else:
-                tag = f"🔥 <b>عرض فعالية/كوبون — {htmllib.escape(it['store'])}</b> (خصم {it['saving_pct']}%)"
-                ref_txt = f"ℹ️ السعر السابق بالموقع: {it['ref_price']:,} ج.م (لم يُرصد منافس أرخص أثناء الفحص المباشر)"
 
             hist_line = (
                 f"📊 أقل سعر مسجل آخر 30 يوماً ({obs_d} يوم): {it['min_30d']:,} ج.م\n"
@@ -2529,7 +2505,7 @@ def main() -> None:
             )
             rev_cnt = safe_int(it.get("reviews"))
             rev_str = f" ({rev_cnt:,} تقييم)" if rev_cnt > 0 else ""
-            rate_line = f"⭐ التقييم: <b>{it['rating']}/5</b>{rev_str}\n" if it.get("rating", 0) >= 3.6 else ""
+            rate_line = f"⭐ التقييم: <b>{it['rating']}/5</b>{rev_str}\n" if it.get("rating", 0) >= 3.7 else ""
             var_cnt = safe_int(it.get("variant_count"), 1)
             var_line = f"🎨 <i>متوفر بـ {var_cnt} ألوان/مقاسات</i>\n" if var_cnt > 1 else ""
             coupon_line = f"🎟 <b>السعر يشمل الكوبون: {htmllib.escape(it['coupon'])}</b>\n" if it.get("coupon") else ""
@@ -2572,8 +2548,6 @@ def main() -> None:
                 cat_sent_limits[item_cat] += 1
                 cat_sent_counter[cat_badge] += 1
                 total_sent += 1
-                if is_event_fallback:
-                    unverified_event_sent += 1
                 if total_sent % 5 == 0:
                     save_json(STATE_FILE, state)
                 time.sleep(1.1)
@@ -2602,15 +2576,16 @@ def main() -> None:
     neg = safe_int(rules.get("stats", {}).get("total_negative"))
     auto_wins = safe_int(rules.get("stats", {}).get("auto_verified_wins"))
     total_fakes_ever = safe_int(rules.get("stats", {}).get("fake_caught_live"))
+    google_fakes_ever = safe_int(rules.get("stats", {}).get("google_cheaper_caught"))
     total_fb = pos + neg + auto_wins
     accuracy_pct = round(((pos + auto_wins) / total_fb * 100), 1) if total_fb > 0 else 100.0
 
     elapsed = (time.time() - t0) / 60.0
     total_unique = sum(d["unique"] for d in store_diag.values())
     summary_lines = [
-        f"📊 <b>ملخص جولة رادار التحقق المباشر (V40 — جولة #{rules.get('run_counter', 1)})</b>",
+        f"📊 <b>ملخص جولة رادار التحقق الصارم (V41 — جولة #{rules.get('run_counter', 1)})</b>",
         f"🔎 سلع فريدة مفحوصة: <b>{total_unique:,}</b> | 🗂 قاعدة أسعار السوق: <b>{len(market_index):,} موديل</b>",
-        f"🛡 درع العروض الوهمية: تم كشف وإحباط <b>{fake_caught_this_run}</b> عرض أرخص عند المنافسين الآن (إجمالي الإحباطات: {total_fakes_ever:,})",
+        f"🛡 درع العروض الوهمية: إحباط <b>{fake_caught_this_run}</b> منافس أرخص (إجمالي: {total_fakes_ever:,}) + <b>{google_caught_this_run}</b> أرخص في جوجل (إجمالي: {google_fakes_ever:,})",
         f"🏆 صفقات مؤكدة بالتحقق المباشر في هذه الجولة: <b>{live_verified_wins}</b>",
         ""
     ]
@@ -2629,7 +2604,7 @@ def main() -> None:
         cat_summary = " | ".join(f"{k}: {v}" for k, v in cat_sent_counter.most_common())
         summary_lines.append(f"\n📂 <b>الأقسام المرسلة</b>:\n{cat_summary}")
 
-    summary_lines.append(f"\n🧠 <b>التعلم الذاتي 7.0</b>: الدقة {accuracy_pct}% ({pos}👍 | {neg}👎 | {auto_wins}🎯 توثيق تلقائي)")
+    summary_lines.append(f"\n🧠 <b>التعلم الذاتي 7.1</b>: الدقة {accuracy_pct}% ({pos}👍 | {neg}👎 | {auto_wins}🎯 توثيق تلقائي)")
     summary_lines.append(f"💾 حالة الذاكرة: {'تم الحفظ في GitHub ✅' if git_ok else 'محفوظ محلياً فقط ⚠️'}")
     summary_lines.append(f"⏱ الوقت: {elapsed:.1f} دقيقة | 📨 إجمالي الصفقات المرسلة: <b>{total_sent}</b>")
     summary_text = "\n".join(summary_lines)
