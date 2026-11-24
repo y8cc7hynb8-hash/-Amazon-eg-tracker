@@ -3,10 +3,12 @@ name: Run Egypt Deals Radar
 on:
   workflow_dispatch:
   schedule:
-    - cron: '13,43 * * * *'
+    # إنعاش احتياطي كل 6 ساعات لو توقفت السلسلة لأي سبب
+    - cron: '23 */6 * * *'
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: egypt-deals-radar
@@ -15,7 +17,7 @@ concurrency:
 jobs:
   track:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 345
 
     steps:
       - name: Checkout code
@@ -31,8 +33,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -q requests beautifulsoup4 curl_cffi cloudscraper
 
-      - name: Run tracker
+      - name: Scan every ~30 minutes (10 scans per loop)
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python -u tracker.py
+        run: |
+          for i in $(seq 1 10); do
+            echo "===== Scan $i / 10 - $(date -u '+%Y-%m-%d %H:%M UTC') ====="
+            python -u tracker.py || true
+            if [ "$i" -lt 10 ]; then
+              sleep 1680
+            fi
+          done
+
+      - name: Chain next loop (keeps the ~30min cadence alive)
+        if: always()
+        run: gh workflow run run.yml --ref main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
