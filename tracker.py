@@ -1884,17 +1884,56 @@ def extract_price_from_product_page(html_text: str, store_id: str) -> int:
         m = re.search(r'"sale_price"\s*:\s*"?(\d{2,6})"?', html_text)
         if m:
             return safe_int(m.group(1))
+    # محددات عامة لصفحات المنتج (PrestaShop/Magento وغيرها)
+    soup_g = BeautifulSoup(html_text, "html.parser")
+    for sel in ("#our_price_display", "#buy-price", ".current-price", ".product-price",
+                ".special-price", "[data-price-type='finalPrice']", ".final-price .price",
+                ".product-info-price .price"):
+        el = soup_g.select_one(sel)
+        if el is not None:
+            v = parse_price(el.get_text(" ", strip=True), set(), explicit_egp=_element_has_egp(el))
+            if v:
+                return v
     return 0
 
 
-def recheck_own_price(cand: dict) -> int:
-    """إعادة فحص صفحة المنتج نفسها مباشرة (بدون بروكسي/كاش) قبل أي إرسال."""
+def extract_old_price_from_product_page(html_text: str, store_id: str) -> int:
+    """السعر المشطوب من صفحة المنتج الحية — دليل وجود خصم حقيقي معلن من المتجر نفسه."""
+    if not html_text:
+        return 0
+    soup = BeautifulSoup(html_text, "html.parser")
+    if store_id == "amazon":
+        el = soup.select_one(
+            "#priceblock_listprice, .priceBlockStrikePriceString, "
+            "span.a-text-price span.a-offscreen, .basisPrice span.a-offscreen"
+        )
+        if el is not None:
+            return parse_price(el.get_text(" ", strip=True), set(), explicit_egp=True)
+        return 0
+    if store_id == "noon":
+        m = re.search(r'"price"\s*:\s*"?(\d{2,6})"?', html_text)
+        if m:
+            return safe_int(m.group(1))
+        return 0
+    for sel in ("#old_price_display", ".old-price .price", ".old-price",
+                ".regular-price", "del .price", "del", ".price-discount",
+                "[data-price-type='oldPrice'] .price", "[data-price-type='oldPrice']"):
+        el = soup.select_one(sel)
+        if el is not None:
+            v = parse_price(el.get_text(" ", strip=True), set(), explicit_egp=True)
+            if v:
+                return v
+    return 0
+
+
+def recheck_own_prices(cand: dict) -> Tuple[int, int]:
+    """إعادة فحص صفحة المنتج نفسها مباشرة (بدون بروكسي/كاش) قبل أي إرسال. يرجع (السعر الحالي، السعر المشطوب)."""
     link = cand.get("clean_link") or cand.get("link", "")
     sid = cand.get("sid", "")
     if not link:
-        return 0
+        return (0, 0)
     html_txt, _vp = smart_fetch(link, sid, is_amazon=(sid == "amazon"), fast_mode=False, allow_proxy=False)
-    return extract_price_from_product_page(html_txt, sid)
+    return (extract_price_from_product_page(html_txt, sid), extract_old_price_from_product_page(html_txt, sid))
 
 
 def live_verify_candidate(cand: dict) -> Tuple[int, str, str, int, bool]:
@@ -2609,10 +2648,10 @@ def main() -> None:
         to_verify = deduped_pool[:MAX_LIVE_VERIFICATIONS]
         log(f"🔎 إعادة فحص صفحة المنتج + التحقق من المنافسين لـ {len(to_verify)} مرشح...")
 
-        def _full_verify(c: dict) -> Tuple[int, int, str, str, int, bool]:
-            own_p = recheck_own_price(c)
+        def _full_verify(c: dict) -> Tuple[int, int, int, str, str, int, bool]:
+            own_p, own_old_p = recheck_own_prices(c)
             live_p, live_st, live_link, google_p, key_matched = live_verify_candidate(c)
-            return own_p, live_p, live_st, live_link, google_p, key_matched
+            return own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched
 
         final_verified: List[dict] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as v_exec:
@@ -2622,9 +2661,9 @@ def main() -> None:
                 sid = cand["sid"]
                 diag = store_diag[sid]
                 try:
-                    own_p, live_p, live_st, live_link, google_p, key_matched = fut.result()
+                    own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched = fut.result()
                 except Exception:
-                    own_p, live_p, live_st, live_link, google_p, key_matched = 0, 0, "", "", 0, False
+                    own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched = 0, 0, 0, "", "", 0, False
 
                 # 1) صفحة المنتج نفسها هي الحكم الأخير على السعر
                 if own_p <= 0:
@@ -2679,6 +2718,18 @@ def main() -> None:
                     diag["accepted"] += 1
                     final_verified.append(cand)
                 else:
+                    # خصم مشطوب: يُقبل فقط إذا أكدت صفحة المتجر الحية السعر الحالي والسعر المشطوب معاً
+                    if own_old_p >= cand["price"] * 1.10 and own_old_p >= safe_int(cand.get("old")) * 0.85:
+                        disc_live = round((own_old_p - cand["price"]) / own_old_p * 100)
+                        if disc_live <= MAX_REALISTIC_DISC:
+                            cand["deal_type"] = "خصم موثق من صفحة المتجر (تحقق مباشر)"
+                            cand["ref_price"] = own_old_p
+                            cand["saving_pct"] = disc_live
+                            cand["live_verified"] = True
+                            cand["conf_score"] = min(cand["conf_score"], 75)
+                            diag["accepted"] += 1
+                            final_verified.append(cand)
+                            continue
                     diag["reject_reasons"]["unverified_discount_rejected"] += 1
 
         fail_counts = rules.setdefault("store_fail_counts", {})
@@ -2743,6 +2794,9 @@ def main() -> None:
             elif dtype == "أرخص من المنافسين":
                 tag = f"🏆 <b>أقل سعر في السوق — {htmllib.escape(it['store'])}</b>"
                 ref_txt = f"🏪 أقل سعر مسجل لدى <b>{comp_ar}</b>: {it['ref_price']:,} ج.م (توفير {saving:,} ج.م — {it['saving_pct']}%)"
+            elif dtype == "خصم موثق من صفحة المتجر (تحقق مباشر)":
+                tag = f"🔥 <b>خصم موثق الآن (تحقق مباشر) — {htmllib.escape(it['store'])}</b>"
+                ref_txt = f"🏷 السعر قبل الخصم على صفحة المتجر الآن: {it['ref_price']:,} ج.م (خصم {it['saving_pct']}% — وفر {saving:,} ج.م)"
             elif dtype == "هبوط تاريخي صامت موثق":
                 tag = f"📉 <b>هبوط سعر تاريخي موثق — {htmllib.escape(it['store'])}</b>"
                 ref_txt = f"🏷 وسيط السعر ({obs_d} أيام رصد): {it['ref_price']:,} ج.م (نزل {it['saving_pct']}% — وفر {saving:,} ج.م)"
