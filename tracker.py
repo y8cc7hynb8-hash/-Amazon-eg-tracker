@@ -1148,6 +1148,13 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
         elif len(tok) >= 3 and not tok.replace(".", "").isdigit():
             core_words.append(tok)
 
+    # موديلات سامسونج الكاملة (UA65U8000HUXEG) يُشتق منها أيضاً مفتاح السلسلة (u8000h)
+    # لمطابقة العناوين المختصرة — وحرف السنة (f مقابل h) يبقى جزءاً من المفتاح فلا تختلط الموديلات
+    for m_tok in list(models):
+        m_sam = re.fullmatch(r"ua\d{2}([a-z]?\d{4,5}[a-z])ux[a-z]{2}", m_tok)
+        if m_sam:
+            models.append(m_sam.group(1))
+
     models = sorted(set(models), key=lambda x: (len(x), x))
     core_sorted = list(dict.fromkeys(core_words))[:5]
 
@@ -1810,6 +1817,57 @@ def _live_search_store(target_store: str, query: str) -> List[dict]:
     return enriched
 
 
+_ARKHAS_CACHE: Dict[str, Tuple[int, str]] = {}
+_ARKHAS_LOCK = threading.Lock()
+
+
+def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
+    """أقل سعر متوفر (in stock) لنفس الموديل الدقيق على مجمّع «أرخص فين» الذي يغطي 30+ محلاً مصرياً
+    (راية، بريكو، عبدالعزيز، الفارس...). مطابقة الهوية تتم بإعادة تحليل عنوان المنتج المرجعي
+    وبنفس مفاتيح الموديل وتوافق المواصفات — فيُقارن u8000h مع u8000h فقط ولا يختلط بـ u8000f.
+    يرجع (السعر، اسم المحل) أو (0، '') عند عدم وجود تطابق موثوق أو فشل المصدر."""
+    if not cand.get("exact_model") or cand.get("category", "") not in STRICT_MATCH_CATS:
+        return (0, "")
+    model_tok = ""
+    for lk in cand.get("lookup_keys", []):
+        parts_lk = lk.split("|", 2)
+        if len(parts_lk) == 3 and len(parts_lk[2]) > len(model_tok):
+            model_tok = parts_lk[2]
+    if len(model_tok) < 5:
+        return (0, "")
+    with _ARKHAS_LOCK:
+        if model_tok in _ARKHAS_CACHE:
+            return _ARKHAS_CACHE[model_tok]
+    best_p, best_st = 0, ""
+    try:
+        url = "https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(model_tok)
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=12)
+        data = resp.json() if resp.status_code == 200 else {}
+        cand_keys = set(cand.get("lookup_keys", []))
+        for prod in data.get("products") or []:
+            ref = prod.get("reference_title") or prod.get("name") or ""
+            if not ref:
+                continue
+            ident = analyze_product_identity(ref)
+            if ident.get("category") != cand.get("category"):
+                continue
+            if not (set(ident.get("lookup_keys", [])) & cand_keys):
+                continue
+            if not specs_are_compatible(cand.get("specs", {}), ident.get("specs", {}), cand.get("category", "")):
+                continue
+            for off in prod.get("offers") or []:
+                if not off.get("in_stock", True):
+                    continue
+                p = safe_int(off.get("price"))
+                if p >= MIN_PRODUCT_PRICE_GLOBAL and (best_p == 0 or p < best_p):
+                    best_p, best_st = p, str(off.get("store_name") or off.get("store") or "")
+    except Exception:
+        best_p, best_st = 0, ""
+    with _ARKHAS_LOCK:
+        _ARKHAS_CACHE[model_tok] = (best_p, best_st)
+    return (best_p, best_st)
+
+
 def _google_lowest_price_egp(query: str, cur_price: int) -> int:
     """فحص سريع لأسعار المنتج في جوجل (EGP) لاكتشاف وجود سعر أقل في متاجر أخرى."""
     key = query.lower().strip()
@@ -1951,7 +2009,8 @@ def recheck_own_prices(cand: dict) -> Tuple[int, int]:
 
 def live_verify_candidate(cand: dict) -> Tuple[int, str, str, int, bool]:
     """
-    يرجع: (أقل سعر مطابق لدى المنافس المباشر، اسم المتجر المنافس، رابط المنافس، أقل سعر مرصود في جوجل، هل المطابقة بمفتاح موديل دقيق؟)
+    يرجع: (أقل سعر مطابق لدى المنافس المباشر، اسم المتجر المنافس، رابط المنافس، أقل سعر مرصود في جوجل،
+    هل المطابقة بمفتاح موديل دقيق؟، أقل سعر مطابق في «أرخص فين»، اسم المحل الأرخص هناك)
     """
     query = cand.get("search_query", "").strip()
     if len(query) < 4:
@@ -2010,7 +2069,8 @@ def live_verify_candidate(cand: dict) -> Tuple[int, str, str, int, bool]:
                     best_comp_link = item["link"]
 
     google_p = _google_lowest_price_egp(query, cur_p) if cand.get("exact_model") else 0
-    return (best_comp_price, best_comp_store, best_comp_link, google_p, any_key_match)
+    ark_p, ark_st = _arkhasfeen_lowest_price(cand)
+    return (best_comp_price, best_comp_store, best_comp_link, google_p, any_key_match, ark_p, ark_st)
 
 
 # ================= سجل الأسعار وذاكرة الموديل =================
@@ -2661,10 +2721,10 @@ def main() -> None:
         to_verify = deduped_pool[:MAX_LIVE_VERIFICATIONS]
         log(f"🔎 إعادة فحص صفحة المنتج + التحقق من المنافسين لـ {len(to_verify)} مرشح...")
 
-        def _full_verify(c: dict) -> Tuple[int, int, int, str, str, int, bool]:
+        def _full_verify(c: dict) -> Tuple[int, int, int, str, str, int, bool, int, str]:
             own_p, own_old_p = recheck_own_prices(c)
-            live_p, live_st, live_link, google_p, key_matched = live_verify_candidate(c)
-            return own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched
+            live_p, live_st, live_link, google_p, key_matched, ark_p, ark_st = live_verify_candidate(c)
+            return own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched, ark_p, ark_st
 
         final_verified: List[dict] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=VERIFY_WORKERS) as v_exec:
@@ -2674,9 +2734,9 @@ def main() -> None:
                 sid = cand["sid"]
                 diag = store_diag[sid]
                 try:
-                    own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched = fut.result()
+                    own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched, ark_p, ark_st = fut.result()
                 except Exception:
-                    own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched = 0, 0, 0, "", "", 0, False
+                    own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched, ark_p, ark_st = 0, 0, 0, "", "", 0, False, 0, ""
 
                 # 1) صفحة المنتج نفسها هي الحكم الأخير على السعر
                 if own_p <= 0:
@@ -2697,6 +2757,12 @@ def main() -> None:
                     google_caught_this_run += 1
                     diag["reject_reasons"]["cheaper_on_google"] += 1
                     rules["stats"]["google_cheaper_caught"] = safe_int(rules["stats"].get("google_cheaper_caught")) + 1
+                    continue
+
+                # فحص «أرخص فين»: سعر أرخص موثوق لنفس الموديل في أي محل يغطيه المجمّع -> رفض فوري
+                if ark_p > 0 and ark_p <= cand["price"] * g_thr:
+                    diag["reject_reasons"][f"cheaper_on_arkhasfeen({ark_st})"] += 1
+                    rules["stats"]["arkhas_cheaper_caught"] = safe_int(rules["stats"].get("arkhas_cheaper_caught")) + 1
                     continue
 
                 if live_p > 0 and live_st:
