@@ -1030,6 +1030,10 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
     elif re.search(r"\b(xiaomi|redmi|poco|شاومي|ريدمي|بوكو)\b", t):
         brand = "xiaomi"
 
+    # فيفو بوك = ASUS VivoBook (لاب توب)، وليس ماركة فيفو للموبايلات
+    if re.search(r"فيفو\s*بوك|vivobook|vivo\s*book", t):
+        brand = "asus"
+
     for ar_b, en_b in _BRAND_ALIASES.items():
         norm_ar = normalize_text(ar_b)
         if not brand and re.search(r"(?<!\w)" + re.escape(norm_ar) + r"(?!\w)", t):
@@ -1065,6 +1069,7 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
     is_laptop_ctx = bool(
         cpu_family
         or gpu_token
+        or "لاب توب" in t or "لابتوب" in t or "نوت بوك" in t or "نوتبوك" in t
         or (raw_words_set & _LAPTOP_FORM_FACTORS)
         or (brand in ("dell", "hp", "lenovo", "asus", "acer", "msi") and not any(w in raw_words_set for w in ("شاشه", "monitor", "موبايل", "phone", "تابلت", "tablet", "ساعه", "شنطه", "ماوس", "كيبورد")))
     )
@@ -1073,7 +1078,7 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
 
     t = re.sub(r"\b\d{1,2}\s*(?:gb|g|جيجا|جيجابايت)?\s*[/+]\s*\d{2,4}\s*(?:gb|tb|g|جيجا|جيجابايت|تيرا|تيرابايت)\b", " ", t)
     t = re.sub(r"\b\d{1,4}\s*(?:gb|tb|g\.b|جيجا|جيجابايت|جيجا|تيرا|تيرابايت|تيرا)\b", " ", t)
-    t = re.sub(r"(\d{2}(?:\.\d)?)\s*inch\b", r" \1inch ", t)
+    t = re.sub(r"(\d{2}(?:\.\d)?)[\s-]*inch\b", r" \1inch ", t)
 
     t = re.sub(r"\b(iphone|ipad|redmi|poco|note|tab|watch|band|airpods|series|mi|reno|narzo|spark|hot|camon|pop|moto|edge)\s*[-_]?\s*(\d{1,3}[a-z]?)\b", r"\1\2", t)
     t = re.sub(r"\b(s|a|m|f|c|g|x|v)\s*[-_]?\s*(\d{2})\s*(fe)\b", r"\1\2 \3", t)
@@ -1106,6 +1111,13 @@ def analyze_product_identity(title: str, hint_cat: str = "") -> Dict[str, Any]:
         cat = "MOB"
     else:
         cat = hint_cat or "GEN"
+
+    # تنقية مستويات (tiers) زائفة في الشاشات: "QNED Color Pro" ليست نسخة Pro، و"Mini LED" تقنية شاشة وليست نسخة Mini
+    if cat == "TV" and strict_tiers:
+        if re.search(r"كولور\s*pro|color\s*pro|quantum\s*pro|كوانتم\s*pro", t):
+            strict_tiers = [x for x in strict_tiers if x != "pro"]
+        if re.search(r"mini\s*led|miniled|ميني\s*ليد|ليد\s*ميني", t):
+            strict_tiers = [x for x in strict_tiers if x != "mini"]
 
     stop_words = GENERIC_SHIELD_WORDS | {
         "عرض", "خصم", "سنه", "مع", "من", "في", "شاشه", "موبايل", "هاتف", "تلفزيون",
@@ -1236,7 +1248,8 @@ def specs_are_compatible(s1: Dict[str, str], s2: Dict[str, str], cat: str) -> bo
             return False
 
     i1, i2 = s1.get("inch", ""), s2.get("inch", "")
-    if cat == "TV" and i1 and i2 and i1 != i2:
+    # في الشاشات المقاس هو هوية المنتج: غياب المقاس من أحد الطرفين أو اختلافه = منتج مختلف
+    if cat == "TV" and i1 != i2:
         return False
     if i1 and i2 and i1 != i2:
         return False
@@ -2678,7 +2691,9 @@ def main() -> None:
                         cand["saving_pct"] = round((cand["ref_price"] - own_p) / cand["ref_price"] * 100)
 
                 # فحص سعر جوجل: لو وُجد سعر أرخص في جوجل -> رفض فوري
-                if google_p > 0 and google_p <= cand["price"] * 0.96:
+                # للإلكترونيات ذات الموديل الدقيق: أي سعر أرخص فعلياً (>0.3%) يُسقط الصفقة — معيار المستخدم: الأرخص موثقاً فقط
+                g_thr = 0.997 if (cand.get("exact_model") and cand.get("category", "") in STRICT_MATCH_CATS) else 0.96
+                if google_p > 0 and google_p <= cand["price"] * g_thr:
                     google_caught_this_run += 1
                     diag["reject_reasons"]["cheaper_on_google"] += 1
                     rules["stats"]["google_cheaper_caught"] = safe_int(rules["stats"].get("google_cheaper_caught")) + 1
@@ -2814,6 +2829,11 @@ def main() -> None:
             var_cnt = safe_int(it.get("variant_count"), 1)
             var_line = f"🎨 <i>متوفر بـ {var_cnt} ألوان/مقاسات</i>\n" if var_cnt > 1 else ""
             coupon_line = f"🎟 <b>السعر يشمل الكوبون: {htmllib.escape(it['coupon'])}</b>\n" if it.get("coupon") else ""
+            no_comp = (
+                it.get("exact_model") and item_cat in STRICT_MATCH_CATS
+                and not it.get("lowest_other") and dtype != "أرخص من المنافسين (تحقق مباشر)"
+            )
+            nocomp_line = "⚠️ <i>لم نعثر على نفس الموديل في المتاجر المنافسة للمقارنة المباشرة</i>\n" if no_comp else ""
             safe_link = sanitize_url(it["link"])
 
             msg = (
@@ -2822,6 +2842,7 @@ def main() -> None:
                 f"📦 {htmllib.escape(it['title'])}\n"
                 f"💰 السعر النقدي الصافي: <b>{it['price']:,} ج.م</b>\n"
                 f"{ref_txt}\n"
+                f"{nocomp_line}"
                 f"{hist_line}"
                 f"{rate_line}"
                 f"{var_line}"
