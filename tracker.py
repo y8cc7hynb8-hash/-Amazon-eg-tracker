@@ -1301,6 +1301,20 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False, store_id: s
 
 
 FETCH_FAIL: Dict[str, Counter] = defaultdict(Counter)
+# تراجع تكيفي: كلما ظهرت صفحة حجب/كابتشا لمتجر ينتظر أطول بين طلباته، وكلما نجح الطلب يقل الانتظار
+BOT_BACKOFF: Dict[str, float] = defaultdict(float)
+BACKOFF_STORES = ("amazon", "noon", "2b", "raneen")
+BACKOFF_MAX = 14.0
+
+
+def _bo_hit(store_id: str) -> None:
+    if store_id in BACKOFF_STORES:
+        BOT_BACKOFF[store_id] = min(BACKOFF_MAX, BOT_BACKOFF[store_id] * 1.5 + 1.0)
+
+
+def _bo_ok(store_id: str) -> None:
+    if store_id in BOT_BACKOFF:
+        BOT_BACKOFF[store_id] = max(0.0, BOT_BACKOFF[store_id] * 0.8 - 0.2)
 
 
 def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: bool = False, allow_proxy: bool = True) -> Tuple[str, bool]:
@@ -1309,6 +1323,8 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
     with sem:
         sleep_range = (0.6, 1.3) if store_id == "jumia" else ((0.15, 0.4) if fast_mode else (0.25, 0.55))
         time.sleep(random.uniform(*sleep_range))
+        if BOT_BACKOFF.get(store_id, 0) > 0.5:
+            time.sleep(random.uniform(0.7, 1.3) * BOT_BACKOFF[store_id])
 
         base_headers = {
             "Accept-Language": AR_LANG,
@@ -1325,13 +1341,21 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
             fps = ["chrome120", "safari17_0", "chrome116", "edge101"]
             random.shuffle(fps)
             attempts = 2 if fast_mode else (4 if store_id == "jumia" else 3)
+            _n404 = 0
             for fp in fps[:attempts]:
                 try:
                     sess = cffi_requests.Session(impersonate=fp)
                     r = sess.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
                     if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
+                        _bo_ok(store_id)
                         return r.text, False
                     FETCH_FAIL[store_id][f"cffi_{r.status_code}_blocked"] += 1
+                    if r.status_code == 404 and store_id != "jumia":
+                        _n404 += 1
+                        if _n404 >= 2:
+                            return "", False   # صفحة غير موجودة فعلاً، لا داعي لمزيد من الطلبات
+                    else:
+                        _bo_hit(store_id)
                 except Exception as _e:
                     FETCH_FAIL[store_id]["cffi_exc_" + type(_e).__name__] += 1
 
@@ -1342,7 +1366,9 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
                     local_scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
                     r = local_scraper.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
                     if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
+                        _bo_ok(store_id)
                         return r.text, False
+                    _bo_hit(store_id)
                     FETCH_FAIL[store_id][f"cloudscraper_{r.status_code}_blocked"] += 1
                 except Exception as _e:
                     FETCH_FAIL[store_id]["cloudscraper_exc_" + type(_e).__name__] += 1
@@ -2242,8 +2268,9 @@ def recheck_own_prices(cand: dict) -> Tuple[int, int]:
             old_v = extract_old_price_from_product_page(html_txt, sid)
             if price_v > 0:
                 break
-        if _attempt < 2:
-            time.sleep(random.uniform(4, 9))
+        if sid in ("amazon", "noon") or _attempt >= 2:
+            break   # متاجر بجدار حماية: لا إعادة محاولة (تزيد الحجب)
+        time.sleep(random.uniform(4, 9))
     return (price_v, old_v)
 
 
@@ -2706,7 +2733,7 @@ def _fetch_and_extract_task(
     is_amz = (stype == "amazon")
 
     html_txt, via_proxy = smart_fetch(url, sid, is_amazon=is_amz)
-    if not html_txt and sid not in ("jumia", "amazon"):
+    if not html_txt and sid not in ("jumia", "amazon", "noon"):
         # حجب متقطع (403/مهلة): محاولة ثانية بعد انتظار عشوائي
         time.sleep(random.uniform(5, 10))
         html_txt, via_proxy = smart_fetch(url, sid, is_amazon=is_amz)
@@ -3278,7 +3305,8 @@ def main() -> None:
                 "stores": {sid_: {"opened": d_["opened"], "raw": d_["raw"], "unique": d_["unique"], "exact": d_["exact_models"],
                                   "cross": d_["cross_matched"], "accepted": d_["accepted"], "sent": d_["sent"],
                                   "rejects": dict(d_["reject_reasons"]),
-                                  "fetch_fail": dict(FETCH_FAIL.get(sid_, {}))} for sid_, d_ in store_diag.items()},
+                                  "fetch_fail": dict(FETCH_FAIL.get(sid_, {})),
+                                  "backoff_s": round(BOT_BACKOFF.get(sid_, 0), 1)} for sid_, d_ in store_diag.items()},
                 "ark_discovery": dict(ARK_DISC_DIAG),
             })
             save_json(STATS_FILE, {"runs": _runs[-300:]})
