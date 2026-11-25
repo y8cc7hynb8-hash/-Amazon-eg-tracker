@@ -1912,21 +1912,21 @@ ARK_MARKET_BUDGET = 110
 _ARK_MKT_CACHE: Dict[str, Any] = {}
 
 
-def _ark_market_proof(it: dict) -> Optional[dict]:
+def _ark_market_proof_why(it: dict) -> Tuple[Optional[dict], str]:
     """إثبات سوقي لسلعة ممسوحة: هل متجرها هو الأرخص (متوفر) لنفس الموديل بفارق >=7% عن أقرب متجر آخر؟
     مطابقة هوية صارمة. يرجع None لو لا يوجد إثبات أو فشل الاستعلام (غير معروف)."""
     if not it.get("exact_model") or it.get("category", "") not in STRICT_MATCH_CATS:
-        return None
+        return None, "skip"
     q = (it.get("search_query") or "").strip()
     if len(q) < 5:
-        return None
+        return None, "short_query"
     ckey = it.get("variant_key", q)
     if ckey in _ARK_MKT_CACHE:
         res = _ARK_MKT_CACHE[ckey]
     else:
         res = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(q))
         if res is None:
-            return None
+            return None, "lookup_failed"
         _ARK_MKT_CACHE[ckey] = res
     cand_keys = set(it.get("lookup_keys", []))
     me = it.get("canonical_seller", "")
@@ -1952,13 +1952,19 @@ def _ark_market_proof(it: dict) -> Optional[dict]:
         typical = safe_int((prod.get("verdict") or {}).get("typical_price"))
         price = it["price"]
         if next_p <= 0 or typical <= 0:
-            return None
+            return None, "no_other_offers"
         if mine_p and abs(mine_p - price) > price * 0.03:
-            return None
-        if mine_p and mine_p > price * 1.03:
-            return None
-        return {"next": next_p, "next_store": next_st, "typical": typical, "stores": safe_int(prod.get("store_count"))}
-    return None
+            return None, "price_mismatch"
+        if next_p < price * 1.07:
+            return None, "not_cheapest_by_7pct"
+        if typical < price * 1.08:
+            return None, "not_below_typical_8pct"
+        return {"next": next_p, "next_store": next_st, "typical": typical, "stores": safe_int(prod.get("store_count"))}, "ok"
+    return None, "no_identity_match"
+
+
+def _ark_market_proof(it: dict) -> Optional[dict]:
+    return _ark_market_proof_why(it)[0]
 
 
 def _apply_ark_disc(it: dict, ad: dict, clean_link: str, deal_hash: str, h_stats: dict) -> None:
@@ -2918,8 +2924,9 @@ def main() -> None:
                 if not is_deal:
                     if reason == "no_real_proof" and ark_budget[0] > 0 and it["exact_model"] and it.get("category", "") in STRICT_MATCH_CATS:
                         ark_budget[0] -= 1
-                        _mp = _ark_market_proof(it)
-                        if _mp and _mp["next"] >= it["price"] * 1.07 and _mp["typical"] >= it["price"] * 1.08:
+                        _mp, _why = _ark_market_proof_why(it)
+                        diag["reject_reasons"]["mp_" + _why] += 1
+                        if _mp:
                             _apply_ark_disc(it, _mp, clean_link, deal_hash, h_stats)
                             pre_candidates.append(it)
                             diag["cross_matched"] += 1
