@@ -1908,6 +1908,76 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
 
 
 ARK_DISC_MAX = 14
+ARK_MARKET_BUDGET = 110
+_ARK_MKT_CACHE: Dict[str, Any] = {}
+
+
+def _ark_market_proof(it: dict) -> Optional[dict]:
+    """إثبات سوقي لسلعة ممسوحة: هل متجرها هو الأرخص (متوفر) لنفس الموديل بفارق >=7% عن أقرب متجر آخر؟
+    مطابقة هوية صارمة. يرجع None لو لا يوجد إثبات أو فشل الاستعلام (غير معروف)."""
+    if not it.get("exact_model") or it.get("category", "") not in STRICT_MATCH_CATS:
+        return None
+    q = (it.get("search_query") or "").strip()
+    if len(q) < 5:
+        return None
+    ckey = it.get("variant_key", q)
+    if ckey in _ARK_MKT_CACHE:
+        res = _ARK_MKT_CACHE[ckey]
+    else:
+        res = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(q))
+        if res is None:
+            return None
+        _ARK_MKT_CACHE[ckey] = res
+    cand_keys = set(it.get("lookup_keys", []))
+    me = it.get("canonical_seller", "")
+    for prod in res.get("products") or []:
+        ref = prod.get("reference_title") or prod.get("name") or ""
+        idr = analyze_product_identity(ref)
+        if idr.get("category") != it.get("category") or not (set(idr.get("lookup_keys", [])) & cand_keys):
+            continue
+        if not specs_are_compatible(it.get("specs", {}), idr.get("specs", {}), it.get("category", "")):
+            continue
+        mine_p, next_p, next_st = 0, 0, ""
+        for off in prod.get("offers") or []:
+            if not off.get("in_stock", True):
+                continue
+            op = safe_int(off.get("price"))
+            if op < MIN_PRODUCT_PRICE_GLOBAL:
+                continue
+            if get_canonical_store_id(str(off.get("store_name", ""))) == me:
+                if mine_p == 0 or op < mine_p:
+                    mine_p = op
+            elif next_p == 0 or op < next_p:
+                next_p, next_st = op, str(off.get("store_name", ""))
+        typical = safe_int((prod.get("verdict") or {}).get("typical_price"))
+        price = it["price"]
+        if next_p <= 0 or typical <= 0:
+            return None
+        if mine_p and abs(mine_p - price) > price * 0.03:
+            return None
+        if mine_p and mine_p > price * 1.03:
+            return None
+        return {"next": next_p, "next_store": next_st, "typical": typical, "stores": safe_int(prod.get("store_count"))}
+    return None
+
+
+def _apply_ark_disc(it: dict, ad: dict, clean_link: str, deal_hash: str, h_stats: dict) -> None:
+    it["ark_disc"] = ad
+    it["clean_link"] = clean_link
+    it["deal_hash"] = deal_hash
+    ref = max(ad["next"], ad["typical"])
+    it["deal_type"] = "أرخص سعر بين المتاجر (مقارنة أرخص فين + تحقق مباشر)"
+    it["ref_price"] = ref
+    it["saving_pct"] = round((ref - it["price"]) / ref * 100) if ref > it["price"] else 0
+    it["conf_score"] = 78
+    it["min_30d"] = h_stats["min_30d"]
+    it["obs_days_30d"] = h_stats["obs_days_30d"]
+    it["history_strength"] = h_stats["history_strength"]
+    it["lowest_other"] = ad["next"]
+    it["comp_store_id"] = get_canonical_store_id(ad["next_store"])
+    it["needs_live_verify"] = True
+    it["live_verified"] = False
+
 
 
 def _ark_store_page_url(go_url: str) -> str:
@@ -2753,6 +2823,7 @@ def main() -> None:
             items_by_store[it["sid"]].append(it)
 
         pre_candidates: List[dict] = []
+        ark_budget = [ARK_MARKET_BUDGET]
 
         for st in stores:
             sid, sname = st["id"], st["name"]
@@ -2769,7 +2840,10 @@ def main() -> None:
 
             diag["unique"] = len(unique_store_items)
 
-            for clean_link, it in unique_store_items.items():
+            def _claimed(kv):
+                _o, _p = kv[1].get("old", 0), kv[1].get("price", 0)
+                return -((_o / _p) if (_p > 0 and _o > _p) else 0)
+            for clean_link, it in sorted(unique_store_items.items(), key=_claimed):
                 if it["exact_model"]:
                     diag["exact_models"] += 1
 
@@ -2792,21 +2866,7 @@ def main() -> None:
                 model_baseline_med = update_and_get_model_baseline(rules, v_key, it["price"], it["exact_model"], now)
 
                 if it.get("ark_disc"):
-                    _ad = it["ark_disc"]
-                    it["clean_link"] = clean_link
-                    it["deal_hash"] = deal_hash
-                    _ref = max(_ad["next"], _ad["typical"])
-                    it["deal_type"] = "أرخص سعر بين المتاجر (اكتشاف أرخص فين + تحقق مباشر)"
-                    it["ref_price"] = _ref
-                    it["saving_pct"] = round((_ref - it["price"]) / _ref * 100) if _ref > it["price"] else 0
-                    it["conf_score"] = 78
-                    it["min_30d"] = h_stats["min_30d"]
-                    it["obs_days_30d"] = h_stats["obs_days_30d"]
-                    it["history_strength"] = h_stats["history_strength"]
-                    it["lowest_other"] = _ad["next"]
-                    it["comp_store_id"] = get_canonical_store_id(_ad["next_store"])
-                    it["needs_live_verify"] = True
-                    it["live_verified"] = False
+                    _apply_ark_disc(it, it["ark_disc"], clean_link, deal_hash, h_stats)
                     pre_candidates.append(it)
                     continue
 
@@ -2856,6 +2916,14 @@ def main() -> None:
                 )
 
                 if not is_deal:
+                    if reason == "no_real_proof" and ark_budget[0] > 0 and it["exact_model"] and it.get("category", "") in STRICT_MATCH_CATS:
+                        ark_budget[0] -= 1
+                        _mp = _ark_market_proof(it)
+                        if _mp and _mp["next"] >= it["price"] * 1.07 and _mp["typical"] >= it["price"] * 1.08:
+                            _apply_ark_disc(it, _mp, clean_link, deal_hash, h_stats)
+                            pre_candidates.append(it)
+                            diag["cross_matched"] += 1
+                            continue
                     diag["reject_reasons"][reason] += 1
                     continue
 
