@@ -1300,6 +1300,9 @@ def is_blocked_page(text: str, status: int, is_amazon: bool = False, store_id: s
     return any(b in title for b in ("just a moment", "attention required", "access denied", "403 forbidden", "security checkpoint", "robot check", "one more step", "sorry! something went wrong"))
 
 
+FETCH_FAIL: Dict[str, Counter] = defaultdict(Counter)
+
+
 def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: bool = False, allow_proxy: bool = True) -> Tuple[str, bool]:
     """يرجع (الصفحة, هل أتت من بروكسي/كاش خارجي؟). صفحات البروكسي قد تكون مخزنة قديمة."""
     sem = get_domain_semaphore(store_id)
@@ -1328,8 +1331,9 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
                     r = sess.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
                     if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
                         return r.text, False
-                except Exception:
-                    pass
+                    FETCH_FAIL[store_id][f"cffi_{r.status_code}_blocked"] += 1
+                except Exception as _e:
+                    FETCH_FAIL[store_id]["cffi_exc_" + type(_e).__name__] += 1
 
         if HAS_CLOUDSCRAPER:
             cs_tries = 2 if store_id == "jumia" else 1
@@ -1339,8 +1343,9 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
                     r = local_scraper.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
                     if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
                         return r.text, False
-                except Exception:
-                    pass
+                    FETCH_FAIL[store_id][f"cloudscraper_{r.status_code}_blocked"] += 1
+                except Exception as _e:
+                    FETCH_FAIL[store_id]["cloudscraper_exc_" + type(_e).__name__] += 1
 
         if fast_mode and store_id != "jumia":
             return "", False
@@ -1364,10 +1369,13 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
                     h["X-With-Links-Summary"] = "true"
                 r = cffi_requests.get(purl, headers=h, impersonate="chrome120", timeout=14) if HAS_CFFI else requests.get(purl, headers=h, timeout=14)
                 if r.status_code != 200 or not r.text:
+                    FETCH_FAIL[store_id][f"{pname}_{r.status_code}"] += 1
                     continue
                 if not is_blocked_page(r.text, 200, is_amazon=is_amazon, store_id=store_id):
                     return r.text, True
-            except Exception:
+                FETCH_FAIL[store_id][f"{pname}_blocked_page"] += 1
+            except Exception as _e:
+                FETCH_FAIL[store_id][f"{pname}_exc_{type(_e).__name__}"] += 1
                 continue
 
         return "", False
@@ -3251,7 +3259,8 @@ def main() -> None:
                 "ts": now, "run": rules.get("run_counter", 0), "sent": total_sent,
                 "stores": {sid_: {"opened": d_["opened"], "raw": d_["raw"], "unique": d_["unique"], "exact": d_["exact_models"],
                                   "cross": d_["cross_matched"], "accepted": d_["accepted"], "sent": d_["sent"],
-                                  "rejects": dict(d_["reject_reasons"])} for sid_, d_ in store_diag.items()},
+                                  "rejects": dict(d_["reject_reasons"]),
+                                  "fetch_fail": dict(FETCH_FAIL.get(sid_, {}))} for sid_, d_ in store_diag.items()},
             })
             save_json(STATS_FILE, {"runs": _runs[-300:]})
         except Exception as e:
