@@ -1916,6 +1916,7 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
 
 
 ARK_DISC_MAX = 14
+ARK_DISC_DIAG: Counter = Counter()
 ARK_MARKET_BUDGET = 110
 _ARK_MKT_CACHE: Dict[str, Any] = {}
 
@@ -2019,6 +2020,7 @@ def discover_arkhasfeen_items(custom_blocked: Set[str], custom_bigrams: Set[str]
     إعادة فحص صفحة المتجر الحية + تأكيد أرخص سعر مقابل بقية المتاجر لنفس الموديل بنفس المطابقة الصارمة."""
     out: List[dict] = []
     data = _ark_get_json("https://arkhasfeen.com/api/deals")
+    ARK_DISC_DIAG["deals_fetch_ok" if data else "deals_fetch_failed"] += 1
     if not data:
         log("🔭 اكتشاف أرخص فين: تعذر جلب القائمة (غير معروف، لا يؤثر على التحقق)")
         return out
@@ -2050,6 +2052,7 @@ def discover_arkhasfeen_items(custom_blocked: Set[str], custom_bigrams: Set[str]
         # أسعار بقية المتاجر لنفس الموديل (مطابقة هوية صارمة)
         res = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(ident["search_query"] or name))
         if res is None:
+            ARK_DISC_DIAG["search_failed"] += 1
             continue
         cand_keys = set(ident.get("lookup_keys", []))
         next_p, next_st, mine_p = 0, "", 0
@@ -2075,9 +2078,11 @@ def discover_arkhasfeen_items(custom_blocked: Set[str], custom_bigrams: Set[str]
                     next_p, next_st = op, str(off.get("store_name", ""))
             break
         if not matched or mine_p <= 0 or next_p <= 0 or abs(mine_p - price) > price * 0.03:
+            ARK_DISC_DIAG["no_match_or_price"] += 1
             continue
         link = _ark_store_page_url(go_url)
         if not link:
+            ARK_DISC_DIAG["no_store_link"] += 1
             continue
         canon = get_canonical_store_id(store)
         page_sid = canon if canon in ("amazon", "noon", "2b", "raneen", "dream2000") else "general"
@@ -3274,6 +3279,7 @@ def main() -> None:
                                   "cross": d_["cross_matched"], "accepted": d_["accepted"], "sent": d_["sent"],
                                   "rejects": dict(d_["reject_reasons"]),
                                   "fetch_fail": dict(FETCH_FAIL.get(sid_, {}))} for sid_, d_ in store_diag.items()},
+                "ark_discovery": dict(ARK_DISC_DIAG),
             })
             save_json(STATS_FILE, {"runs": _runs[-300:]})
         except Exception as e:
