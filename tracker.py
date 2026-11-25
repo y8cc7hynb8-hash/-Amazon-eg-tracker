@@ -78,6 +78,10 @@ HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 RULES_FILE = os.path.join(DATA_DIR, "learned_rules.json")
 MARKET_FILE = os.path.join(DATA_DIR, "market_index.json")
 BLOCKED_FILE = os.path.join(DATA_DIR, "blocked_stores.json")
+STATS_FILE = os.path.join(DATA_DIR, "stats.json")
+# V43: إدخالات الذاكرة القديمة (قبل إطلاق V42 = البوت غير الموثق) تحجب التكرار 3 أيام فقط بدل 14
+LEGACY_CUTOFF_TS = 1795543920  # 2026-11-24 18:12 UTC
+LEGACY_TTL_DAYS = 3
 PROOF_MAX_AGE = 2 * DAY  # سجل السوق الأقدم من 48 ساعة لا يصلح دليلاً بدون تحقق حي
 STRICT_MATCH_CATS = {"MOB", "LAP", "TV", "APPL"}  # مطابقة صارمة بالموديل فقط
 STORE_COOLDOWN = 6 * 3600  # إيقاف مؤقت لمتجر محجوب 6 ساعات
@@ -432,7 +436,7 @@ def _is_git_rebase_in_progress() -> bool:
 
 
 def commit_state(state: dict, history: dict, rules: dict, market_index: dict) -> bool:
-    target_files = [f for f in (STATE_FILE, HISTORY_FILE, RULES_FILE, MARKET_FILE, BLOCKED_FILE) if os.path.exists(f)]
+    target_files = [f for f in (STATE_FILE, HISTORY_FILE, RULES_FILE, MARKET_FILE, BLOCKED_FILE, STATS_FILE) if os.path.exists(f)]
     if not target_files:
         return False
 
@@ -1821,11 +1825,46 @@ _ARKHAS_CACHE: Dict[str, Tuple[int, str]] = {}
 _ARKHAS_LOCK = threading.Lock()
 
 
+_ARK_NET_LOCK = threading.Lock()
+_ARK_LAST_CALL = [0.0]
+_ARK_COOLDOWN_UNTIL = [0.0]
+ARK_MIN_GAP = 1.4
+ARK_HDR = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+
+def _ark_get_json(url: str) -> Optional[dict]:
+    """طلب JSON من «أرخص فين» بخنق وإعادة محاولة عند 429. يرجع None عند أي فشل (= غير معروف، وليس «لا يوجد أرخص»)."""
+    for attempt in range(3):
+        with _ARK_NET_LOCK:
+            wait_cd = _ARK_COOLDOWN_UNTIL[0] - time.time()
+            if wait_cd > 25:
+                return None
+            if wait_cd > 0:
+                time.sleep(wait_cd)
+            gap = ARK_MIN_GAP - (time.time() - _ARK_LAST_CALL[0])
+            if gap > 0:
+                time.sleep(gap)
+            _ARK_LAST_CALL[0] = time.time()
+            try:
+                resp = requests.get(url, headers=ARK_HDR, timeout=12)
+            except Exception:
+                return None
+            if resp.status_code == 429:
+                ra = safe_int(resp.headers.get("Retry-After"), default=0)
+                _ARK_COOLDOWN_UNTIL[0] = time.time() + min(30, max(8, ra) * (attempt + 1))
+                continue
+            if resp.status_code != 200:
+                return None
+            try:
+                return resp.json()
+            except Exception:
+                return None
+    return None
+
+
 def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
-    """أقل سعر متوفر (in stock) لنفس الموديل الدقيق على مجمّع «أرخص فين» الذي يغطي 30+ محلاً مصرياً
-    (راية، بريكو، عبدالعزيز، الفارس...). مطابقة الهوية تتم بإعادة تحليل عنوان المنتج المرجعي
-    وبنفس مفاتيح الموديل وتوافق المواصفات — فيُقارن u8000h مع u8000h فقط ولا يختلط بـ u8000f.
-    يرجع (السعر، اسم المحل) أو (0، '') عند عدم وجود تطابق موثوق أو فشل المصدر."""
+    """أقل سعر متوفر (in stock) لنفس الموديل الدقيق على مجمّع «أرخص فين».
+    يرجع (السعر، المحل) أو (0، '') لو لا يوجد تطابق موثوق، أو (-1، '') لو فشل الاستعلام (غير معروف — لا يُعامل كـ«لا يوجد أرخص»)."""
     if not cand.get("exact_model") or cand.get("category", "") not in STRICT_MATCH_CATS:
         return (0, "")
     model_tok = ""
@@ -1838,11 +1877,11 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
     with _ARKHAS_LOCK:
         if model_tok in _ARKHAS_CACHE:
             return _ARKHAS_CACHE[model_tok]
+    data = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(model_tok))
+    if data is None:
+        return (-1, "")
     best_p, best_st = 0, ""
     try:
-        url = "https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(model_tok)
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}, timeout=12)
-        data = resp.json() if resp.status_code == 200 else {}
         cand_keys = set(cand.get("lookup_keys", []))
         for prod in data.get("products") or []:
             ref = prod.get("reference_title") or prod.get("name") or ""
@@ -1862,10 +1901,113 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
                 if p >= MIN_PRODUCT_PRICE_GLOBAL and (best_p == 0 or p < best_p):
                     best_p, best_st = p, str(off.get("store_name") or off.get("store") or "")
     except Exception:
-        best_p, best_st = 0, ""
+        return (-1, "")
     with _ARKHAS_LOCK:
         _ARKHAS_CACHE[model_tok] = (best_p, best_st)
     return (best_p, best_st)
+
+
+ARK_DISC_MAX = 14
+
+
+def _ark_store_page_url(go_url: str) -> str:
+    """يحل رابط /go/ID إلى رابط صفحة المنتج في المتجر (بدون متابعة التحويل)."""
+    if not go_url:
+        return ""
+    try:
+        full = go_url if go_url.startswith("http") else "https://arkhasfeen.com" + go_url
+        with _ARK_NET_LOCK:
+            gap = ARK_MIN_GAP - (time.time() - _ARK_LAST_CALL[0])
+            if gap > 0:
+                time.sleep(gap)
+            _ARK_LAST_CALL[0] = time.time()
+            r = requests.get(full, headers={"User-Agent": "Mozilla/5.0"}, timeout=12, allow_redirects=False)
+        loc = r.headers.get("Location", "")
+        if r.status_code in (301, 302, 303, 307, 308) and loc.startswith("http") and "arkhasfeen.com" not in loc:
+            return loc
+    except Exception:
+        pass
+    return ""
+
+
+def discover_arkhasfeen_items(custom_blocked: Set[str], custom_bigrams: Set[str]) -> List[dict]:
+    """اكتشاف مرشحين من قوائم «أرخص فين» (deals + gaps). هؤلاء مرشحون فقط: لا يُرسل أي شيء قبل
+    إعادة فحص صفحة المتجر الحية + تأكيد أرخص سعر مقابل بقية المتاجر لنفس الموديل بنفس المطابقة الصارمة."""
+    out: List[dict] = []
+    data = _ark_get_json("https://arkhasfeen.com/api/deals")
+    if not data:
+        log("🔭 اكتشاف أرخص فين: تعذر جلب القائمة (غير معروف، لا يؤثر على التحقق)")
+        return out
+    entries = []
+    for d in data.get("deals") or []:
+        if d.get("label") in ("great", "good"):
+            entries.append((d.get("name", ""), safe_int(d.get("best_price")), d.get("best_store", ""), d.get("go_url", ""),
+                            safe_int(d.get("typical_price")), safe_int(d.get("store_count"))))
+    for g in data.get("gaps") or []:
+        entries.append((g.get("name", ""), safe_int(g.get("low_price")), g.get("low_store", ""), g.get("low_go_url", ""),
+                        safe_int(g.get("typical_price")), safe_int(g.get("store_count"))))
+    seen_names: Set[str] = set()
+    tried = 0
+    for name, price, store, go_url, typical, n_st in entries:
+        if len(out) >= ARK_DISC_MAX or tried >= ARK_DISC_MAX * 2:
+            break
+        if not name or price < MIN_PRODUCT_PRICE_GLOBAL or name in seen_names or n_st < 3:
+            continue
+        if get_canonical_store_id(store) == "jumia":
+            continue
+        seen_names.add(name)
+        ident = analyze_product_identity(name)
+        if not ident.get("exact_model"):
+            continue
+        norm_t = normalize_text(name)
+        if any(w in norm_t for w in custom_blocked):
+            continue
+        tried += 1
+        # أسعار بقية المتاجر لنفس الموديل (مطابقة هوية صارمة)
+        res = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(ident["search_query"] or name))
+        if res is None:
+            continue
+        cand_keys = set(ident.get("lookup_keys", []))
+        next_p, next_st, mine_p = 0, "", 0
+        matched = False
+        for prod in res.get("products") or []:
+            ref = prod.get("reference_title") or prod.get("name") or ""
+            idr = analyze_product_identity(ref)
+            if idr.get("category") != ident.get("category") or not (set(idr.get("lookup_keys", [])) & cand_keys):
+                continue
+            if not specs_are_compatible(ident.get("specs", {}), idr.get("specs", {}), ident.get("category", "")):
+                continue
+            matched = True
+            for off in prod.get("offers") or []:
+                if not off.get("in_stock", True):
+                    continue
+                op = safe_int(off.get("price"))
+                if op < MIN_PRODUCT_PRICE_GLOBAL:
+                    continue
+                if str(off.get("store_name", "")) == store:
+                    if mine_p == 0 or op < mine_p:
+                        mine_p = op
+                elif next_p == 0 or op < next_p:
+                    next_p, next_st = op, str(off.get("store_name", ""))
+            break
+        if not matched or mine_p <= 0 or next_p <= 0 or abs(mine_p - price) > price * 0.03:
+            continue
+        link = _ark_store_page_url(go_url)
+        if not link:
+            continue
+        canon = get_canonical_store_id(store)
+        page_sid = canon if canon in ("amazon", "noon", "2b", "raneen", "dream2000") else "general"
+        out.append({
+            "title": name, "price": mine_p, "old": 0, "link": link, "store": store,
+            "canonical_seller": canon, "sid": "arkdisc", "page_sid": page_sid, "via_proxy": False,
+            "sig": ident["sig"], "lookup_keys": ident["lookup_keys"], "variant_key": ident["variant_key"],
+            "search_query": ident["search_query"], "core_tokens": ident["core_tokens"], "specs": ident["specs"],
+            "exact_model": True, "brand": ident["brand"], "category": ident["category"],
+            "kw": "arkhasfeen_discovery", "rating": 0, "reviews": 0,
+            "ark_disc": {"next": next_p, "next_store": next_st, "typical": typical, "stores": n_st},
+        })
+    log(f"🔭 اكتشاف أرخص فين: {len(out)} مرشح بعد مطابقة الهوية من أصل {tried} فُحص")
+    return out
 
 
 def _google_lowest_price_egp(query: str, cur_price: int) -> int:
@@ -2000,7 +2142,7 @@ def extract_old_price_from_product_page(html_text: str, store_id: str) -> int:
 def recheck_own_prices(cand: dict) -> Tuple[int, int]:
     """إعادة فحص صفحة المنتج نفسها مباشرة (بدون بروكسي/كاش) قبل أي إرسال. يرجع (السعر الحالي، السعر المشطوب)."""
     link = cand.get("clean_link") or cand.get("link", "")
-    sid = cand.get("sid", "")
+    sid = cand.get("page_sid") or cand.get("sid", "")
     if not link:
         return (0, 0)
     html_txt, _vp = smart_fetch(link, sid, is_amazon=(sid == "amazon"), fast_mode=False, allow_proxy=False)
@@ -2530,6 +2672,11 @@ def main() -> None:
         kw_scores = rules.setdefault("keyword_scores", {})
 
         state = {k: v for k, v in state.items() if isinstance(v, dict) and (now - v.get("ts", 0)) < REALERT_DAYS * DAY}
+        _legacy_n = len([1 for v in state.values() if safe_int(v.get("ts")) < LEGACY_CUTOFF_TS])
+        state = {k: v for k, v in state.items()
+                 if safe_int(v.get("ts")) >= LEGACY_CUTOFF_TS or (now - safe_int(v.get("ts"))) < LEGACY_TTL_DAYS * DAY}
+        legacy_expired = _legacy_n - len([1 for v in state.values() if safe_int(v.get("ts")) < LEGACY_CUTOFF_TS])
+        log(f"🧹 ذاكرة الإرسال: انتهت صلاحية {legacy_expired} إدخال قديم (ما قبل V42، TTL={LEGACY_TTL_DAYS} أيام)")
 
         sent_by_variant: Dict[str, int] = {}
         for rec in state.values():
@@ -2548,6 +2695,8 @@ def main() -> None:
                 continue
             active_stores.append(st)
         stores = active_stores
+        stores.append({"id": "arkdisc", "name": "أرخص فين (اكتشاف)", "domain": "https://arkhasfeen.com", "type": "general",
+                       "max_deals": 6, "urls": []})
         all_raw_items: List[dict] = []
         store_diag = {
             st["id"]: {
@@ -2575,6 +2724,15 @@ def main() -> None:
                         all_raw_items.extend(ext_items)
                 except Exception as e:
                     log(f"⚠ خطأ فرعي: {e}")
+
+        try:
+            _disc = discover_arkhasfeen_items(custom_blocked, custom_bigrams)
+            if _disc:
+                store_diag["arkdisc"]["opened"] = True
+                store_diag["arkdisc"]["raw"] += len(_disc)
+                all_raw_items.extend(_disc)
+        except Exception as e:
+            log(f"⚠ خطأ اكتشاف أرخص فين: {e}")
 
         log(f"📦 إجمالي السلع المستخرجة: {len(all_raw_items):,} سلعة.")
 
@@ -2632,6 +2790,25 @@ def main() -> None:
 
                 h_stats = record_and_analyze_history(history, state, rules, deal_hash, clean_link, it["price"], now, allow_write=not it.get("via_proxy"))
                 model_baseline_med = update_and_get_model_baseline(rules, v_key, it["price"], it["exact_model"], now)
+
+                if it.get("ark_disc"):
+                    _ad = it["ark_disc"]
+                    it["clean_link"] = clean_link
+                    it["deal_hash"] = deal_hash
+                    _ref = max(_ad["next"], _ad["typical"])
+                    it["deal_type"] = "أرخص سعر بين المتاجر (اكتشاف أرخص فين + تحقق مباشر)"
+                    it["ref_price"] = _ref
+                    it["saving_pct"] = round((_ref - it["price"]) / _ref * 100) if _ref > it["price"] else 0
+                    it["conf_score"] = 78
+                    it["min_30d"] = h_stats["min_30d"]
+                    it["obs_days_30d"] = h_stats["obs_days_30d"]
+                    it["history_strength"] = h_stats["history_strength"]
+                    it["lowest_other"] = _ad["next"]
+                    it["comp_store_id"] = get_canonical_store_id(_ad["next_store"])
+                    it["needs_live_verify"] = True
+                    it["live_verified"] = False
+                    pre_candidates.append(it)
+                    continue
 
                 lowest_other = 0
                 comp_store_id = ""
@@ -2760,6 +2937,27 @@ def main() -> None:
                     continue
 
                 # فحص «أرخص فين»: سعر أرخص موثوق لنفس الموديل في أي محل يغطيه المجمّع -> رفض فوري
+                if ark_p < 0:
+                    # فشل استعلام أرخص فين = غير معروف: لا نرسل، ونعيد المحاولة في الجولة التالية
+                    diag["reject_reasons"]["arkhasfeen_unknown_deferred"] += 1
+                    continue
+                if cand.get("ark_disc"):
+                    _ad = cand["ark_disc"]
+                    if live_p > 0 and live_p <= cand["price"] * 1.05:
+                        diag["reject_reasons"]["caught_cheaper_on_competitor_live"] += 1
+                        continue
+                    if own_p <= cand["price"] * 1.03 and _ad["next"] >= cand["price"] * 1.07 and _ad["typical"] >= cand["price"] * 1.08:
+                        gap_pct = round((_ad["next"] - cand["price"]) / _ad["next"] * 100)
+                        cand["ref_price"] = _ad["next"]
+                        cand["saving_pct"] = gap_pct
+                        cand["live_verified"] = True
+                        cand["conf_score"] = min(95, 80 + min(15, gap_pct))
+                        live_verified_wins += 1
+                        diag["accepted"] += 1
+                        final_verified.append(cand)
+                    else:
+                        diag["reject_reasons"]["ark_disc_not_confirmed"] += 1
+                    continue
                 if ark_p > 0 and ark_p <= cand["price"] * g_thr:
                     diag["reject_reasons"][f"cheaper_on_arkhasfeen({ark_st})"] += 1
                     rules["stats"]["arkhas_cheaper_caught"] = safe_int(rules["stats"].get("arkhas_cheaper_caught")) + 1
@@ -2971,6 +3169,18 @@ def main() -> None:
         save_json(RULES_FILE, rules)
         save_json(MARKET_FILE, market_index)
         save_json(BLOCKED_FILE, blocked_stores)
+        try:
+            _stats = load_json(STATS_FILE)
+            _runs = _stats.get("runs", []) if isinstance(_stats, dict) else []
+            _runs.append({
+                "ts": now, "run": rules.get("run_counter", 0), "sent": total_sent,
+                "stores": {sid_: {"opened": d_["opened"], "raw": d_["raw"], "unique": d_["unique"], "exact": d_["exact_models"],
+                                  "cross": d_["cross_matched"], "accepted": d_["accepted"], "sent": d_["sent"],
+                                  "rejects": dict(d_["reject_reasons"])} for sid_, d_ in store_diag.items()},
+            })
+            save_json(STATS_FILE, {"runs": _runs[-300:]})
+        except Exception as e:
+            log(f"⚠ تعذر حفظ stats.json: {e}")
         git_ok = commit_state(state, history, rules, market_index)
 
     pos = safe_int(rules.get("stats", {}).get("total_positive"))
