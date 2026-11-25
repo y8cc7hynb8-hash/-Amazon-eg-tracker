@@ -3029,7 +3029,7 @@ def main() -> None:
             _disc = discover_arkhasfeen_items(custom_blocked, custom_bigrams)
             try:
                 _known = {d_["link"].split("?")[0].rstrip("/").lower() for d_ in _disc}
-                _disc.extend(discover_arkhasfeen_search(run_counter, _known, custom_blocked))
+                _disc.extend(discover_arkhasfeen_search(safe_int(rules.get("run_counter")), _known, custom_blocked))
             except Exception as e:
                 log(f"⚠ خطأ بحث أرخص فين المتنوع: {e}")
             if _disc:
