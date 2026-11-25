@@ -2229,8 +2229,17 @@ def recheck_own_prices(cand: dict) -> Tuple[int, int]:
     sid = cand.get("page_sid") or cand.get("sid", "")
     if not link:
         return (0, 0)
-    html_txt, _vp = smart_fetch(link, sid, is_amazon=(sid == "amazon"), fast_mode=False, allow_proxy=False)
-    return (extract_price_from_product_page(html_txt, sid), extract_old_price_from_product_page(html_txt, sid))
+    price_v, old_v = 0, 0
+    for _attempt in range(3):
+        html_txt, _vp = smart_fetch(link, sid, is_amazon=(sid == "amazon"), fast_mode=False, allow_proxy=False)
+        if html_txt:
+            price_v = extract_price_from_product_page(html_txt, sid)
+            old_v = extract_old_price_from_product_page(html_txt, sid)
+            if price_v > 0:
+                break
+        if _attempt < 2:
+            time.sleep(random.uniform(4, 9))
+    return (price_v, old_v)
 
 
 def live_verify_candidate(cand: dict) -> Tuple[int, str, str, int, bool]:
