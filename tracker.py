@@ -2692,6 +2692,10 @@ def _fetch_and_extract_task(
     is_amz = (stype == "amazon")
 
     html_txt, via_proxy = smart_fetch(url, sid, is_amazon=is_amz)
+    if not html_txt and sid not in ("jumia", "amazon"):
+        # حجب متقطع (403/مهلة): محاولة ثانية بعد انتظار عشوائي
+        time.sleep(random.uniform(5, 10))
+        html_txt, via_proxy = smart_fetch(url, sid, is_amazon=is_amz)
     if not html_txt:
         return (sid, False, [])
 
