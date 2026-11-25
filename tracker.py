@@ -1941,7 +1941,7 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
     return (best_p, best_st)
 
 
-ARK_DISC_MAX = 14
+ARK_DISC_MAX = 22
 ARK_DISC_DIAG: Counter = Counter()
 ARK_MARKET_BUDGET = 110
 _ARK_MKT_CACHE: Dict[str, Any] = {}
@@ -2103,8 +2103,49 @@ def discover_arkhasfeen_items(custom_blocked: Set[str], custom_bigrams: Set[str]
                 elif next_p == 0 or op < next_p:
                     next_p, next_st = op, str(off.get("store_name", ""))
             break
-        if not matched or mine_p <= 0 or next_p <= 0 or abs(mine_p - price) > price * 0.03:
-            ARK_DISC_DIAG["no_match_or_price"] += 1
+        if not matched:
+            _tok = ""
+            for _lk in ident.get("lookup_keys", []):
+                _pp = _lk.split("|", 2)
+                if len(_pp) == 3 and len(_pp[2]) > len(_tok):
+                    _tok = _pp[2]
+            if len(_tok) >= 5 and _tok not in (ident["search_query"] or ""):
+                _res2 = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(_tok))
+                if _res2:
+                    res = _res2
+                    next_p, next_st, mine_p = 0, "", 0
+                    for prod in res.get("products") or []:
+                        ref = prod.get("reference_title") or prod.get("name") or ""
+                        idr = analyze_product_identity(ref)
+                        if idr.get("category") != ident.get("category") or not (set(idr.get("lookup_keys", [])) & cand_keys):
+                            continue
+                        if not specs_are_compatible(ident.get("specs", {}), idr.get("specs", {}), ident.get("category", "")):
+                            continue
+                        matched = True
+                        for off in prod.get("offers") or []:
+                            if not off.get("in_stock", True):
+                                continue
+                            op = safe_int(off.get("price"))
+                            if op < MIN_PRODUCT_PRICE_GLOBAL:
+                                continue
+                            if str(off.get("store_name", "")) == store:
+                                if mine_p == 0 or op < mine_p:
+                                    mine_p = op
+                            elif next_p == 0 or op < next_p:
+                                next_p, next_st = op, str(off.get("store_name", ""))
+                        break
+        if not matched:
+            ARK_DISC_DIAG["d_no_identity_match"] += 1
+            continue
+        if mine_p <= 0:
+            # عرض المتجر غير ظاهر في نتيجة البحث: نعتمد سعر القائمة نفسها، وصفحة المتجر الحية هي الحكم النهائي لاحقاً
+            ARK_DISC_DIAG["d_store_offer_from_feed"] += 1
+            mine_p = price
+        if next_p <= 0:
+            ARK_DISC_DIAG["d_no_other_offer"] += 1
+            continue
+        if abs(mine_p - price) > price * 0.03:
+            ARK_DISC_DIAG["d_price_mismatch"] += 1
             continue
         link = _ark_store_page_url(go_url)
         if not link:
