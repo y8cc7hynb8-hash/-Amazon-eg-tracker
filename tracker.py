@@ -2041,6 +2041,128 @@ def _ark_store_page_url(go_url: str) -> str:
     return ""
 
 
+ARK_SEARCH_PAIRS: List[str] = []
+for _noun, _brands in [
+    ("tv", ["samsung", "lg", "sony", "tcl", "hisense", "toshiba", "sharp", "haier", "xiaomi", "fresh", "tornado", "jac", "smart tech"]),
+    ("refrigerator", ["samsung", "lg", "toshiba", "sharp", "haier", "midea", "tornado", "fresh", "unionaire", "bosch", "zanussi", "kiriazi", "hisense"]),
+    ("washing machine", ["samsung", "lg", "toshiba", "sharp", "haier", "midea", "bosch", "zanussi", "unionaire", "fresh", "hisense"]),
+    ("air conditioner", ["carrier", "sharp", "midea", "lg", "samsung", "tornado", "fresh", "gree", "haier", "unionaire", "tcl", "hisense", "toshiba"]),
+    ("microwave", ["samsung", "lg", "sharp", "toshiba", "fresh", "tornado", "midea", "bosch"]),
+    ("water heater", ["ariston", "tornado", "fresh", "toshiba", "sharp", "unionaire", "olympic"]),
+    ("air fryer", ["tefal", "philips", "tornado", "black decker", "kenwood", "xiaomi", "ninja", "fresh", "sharp", "moulinex"]),
+    ("vacuum cleaner", ["samsung", "lg", "philips", "bosch", "tornado", "dyson", "xiaomi", "toshiba", "black decker"]),
+    ("blender", ["moulinex", "tefal", "philips", "kenwood", "braun", "black decker", "tornado", "fresh"]),
+    ("laptop", ["hp", "dell", "lenovo", "asus", "acer", "msi", "apple macbook", "huawei", "infinix"]),
+    ("smartphone", ["samsung galaxy", "iphone", "xiaomi", "redmi", "oppo", "realme", "honor", "infinix", "tecno", "vivo", "nokia", "huawei", "poco"]),
+    ("earbuds", ["oraimo", "anker", "jbl", "samsung", "xiaomi", "huawei", "apple airpods", "sony", "realme"]),
+    ("smart watch", ["xiaomi", "huawei", "samsung", "apple", "amazfit", "oraimo", "haylou"]),
+    ("tablet", ["samsung", "apple ipad", "lenovo", "xiaomi", "huawei"]),
+    ("monitor", ["samsung", "lg", "dell", "hp", "asus", "msi", "acer"]),
+    ("playstation", ["sony ps5", "ps4", "xbox", "nintendo"]),
+    ("printer", ["hp", "canon", "epson", "brother"]),
+    ("ssd", ["samsung", "kingston", "western digital", "crucial"]),
+    ("fan", ["tornado", "fresh", "toshiba", "kenwood", "midea"]),
+    ("heater", ["tornado", "fresh", "kenwood", "sharp", "olympic"]),
+    ("coffee machine", ["delonghi", "nespresso", "philips", "tefal", "kenwood"]),
+    ("cooker", ["unionaire", "fresh", "tornado", "bosch", "zanussi", "kiriazi", "universal"]),
+    ("dishwasher", ["bosch", "samsung", "lg", "siemens", "beko"]),
+]:
+    for _b in _brands:
+        ARK_SEARCH_PAIRS.append(f"{_b} {_noun}")
+ARK_SEARCH_PER_SCAN = 34
+ARK_SEARCH_SKIP_STORES = ("amazon", "noon", "jumia")
+_ARK_AFF_PARAMS = ("tag", "linkcode", "th", "psc", "language", "utm_source", "utm_medium", "utm_campaign", "ref", "src", "aff", "affiliate")
+
+
+def _clean_store_url(u: str) -> str:
+    try:
+        sp = urllib.parse.urlsplit(u)
+        q = [(k, v) for k, v in urllib.parse.parse_qsl(sp.query, keep_blank_values=True) if k.lower() not in _ARK_AFF_PARAMS]
+        return urllib.parse.urlunsplit((sp.scheme, sp.netloc, sp.path, urllib.parse.urlencode(q), ""))
+    except Exception:
+        return u
+
+
+def discover_arkhasfeen_search(run_counter: int, known_links: Set[str], custom_blocked: Set[str], max_out: int = 25) -> List[dict]:
+    """اكتشاف متنوع: نبحث في «أرخص فين» (55 متجراً) عن مجموعة استعلامات تتبدل كل جولة؛ أي منتج حكمه great/good ومتجره الأرخص
+    بفارق >=7% عن أقرب متجر آخر يصبح مرشحاً، ثم يمر بإعادة فحص صفحة المتجر الحية والفحوص الصارمة نفسها قبل أي إرسال."""
+    out: List[dict] = []
+    n = len(ARK_SEARCH_PAIRS)
+    start = (run_counter * ARK_SEARCH_PER_SCAN) % n
+    queries = [ARK_SEARCH_PAIRS[(start + i) % n] for i in range(ARK_SEARCH_PER_SCAN)]
+    seen_ref: Set[str] = set()
+    for q in queries:
+        if len(out) >= max_out:
+            break
+        res = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(q))
+        if res is None:
+            ARK_DISC_DIAG["s_search_failed"] += 1
+            continue
+        ARK_DISC_DIAG["s_queries"] += 1
+        for prod in res.get("products") or []:
+            ARK_DISC_DIAG["s_products_seen"] += 1
+            v = prod.get("verdict") or {}
+            if v.get("label") not in ("great", "good") or not v.get("confident"):
+                continue
+            ref = prod.get("reference_title") or prod.get("name") or ""
+            if not ref or ref in seen_ref or safe_int(prod.get("store_count")) < 3:
+                continue
+            ident = analyze_product_identity(ref)
+            if not ident.get("exact_model"):
+                ARK_DISC_DIAG["s_not_exact_model"] += 1
+                continue
+            if any(w in normalize_text(ref) for w in custom_blocked):
+                continue
+            keys = set(ident.get("lookup_keys", []))
+            best_store = str(v.get("best_store") or "")
+            best_off, next_p, next_st = None, 0, ""
+            for off in prod.get("offers") or []:
+                if not off.get("in_stock", True):
+                    continue
+                op = safe_int(off.get("price"))
+                if op < MIN_PRODUCT_PRICE_GLOBAL:
+                    continue
+                if str(off.get("store_name", "")) == best_store:
+                    if best_off is None or op < safe_int(best_off.get("price")):
+                        best_off = off
+                elif next_p == 0 or op < next_p:
+                    next_p, next_st = op, str(off.get("store_name", ""))
+            if not best_off or next_p <= 0:
+                continue
+            price = safe_int(best_off.get("price"))
+            typical = safe_int(v.get("typical_price"))
+            if price <= 0 or next_p < price * 1.07 or typical < price * 1.08:
+                ARK_DISC_DIAG["s_not_cheap_enough"] += 1
+                continue
+            canon = get_canonical_store_id(best_store)
+            if canon in ARK_SEARCH_SKIP_STORES or best_off.get("imported"):
+                ARK_DISC_DIAG["s_skipped_store"] += 1
+                continue
+            # هوية عرض المتجر نفسه يجب أن تطابق المنتج المرجعي (نفس مفاتيح الموديل والمواصفات)
+            oid = analyze_product_identity(str(best_off.get("title") or ""))
+            if oid.get("category") != ident.get("category") or not (set(oid.get("lookup_keys", [])) & keys) \
+                    or not specs_are_compatible(ident.get("specs", {}), oid.get("specs", {}), ident.get("category", "")):
+                ARK_DISC_DIAG["s_offer_identity_mismatch"] += 1
+                continue
+            link = _clean_store_url(str(best_off.get("url") or ""))
+            if not link.startswith("http") or link.split("?")[0].rstrip("/").lower() in known_links:
+                continue
+            seen_ref.add(ref)
+            page_sid = canon if canon in ("2b", "raneen", "dream2000") else "general"
+            out.append({
+                "title": str(best_off.get("title") or ref), "price": price, "old": 0, "link": link, "store": best_store,
+                "canonical_seller": canon, "sid": "arkdisc", "page_sid": page_sid, "via_proxy": False,
+                "sig": ident["sig"], "lookup_keys": ident["lookup_keys"], "variant_key": ident["variant_key"],
+                "search_query": ident["search_query"], "core_tokens": ident["core_tokens"], "specs": ident["specs"],
+                "exact_model": True, "brand": ident["brand"], "category": ident["category"],
+                "kw": "arkhasfeen_search", "rating": 0, "reviews": 0,
+                "ark_disc": {"next": next_p, "next_store": next_st, "typical": typical, "stores": safe_int(prod.get("store_count"))},
+            })
+            ARK_DISC_DIAG["s_candidates"] += 1
+    log(f"🔭 بحث أرخص فين المتنوع: {len(out)} مرشح من {len(queries)} استعلام (بدءاً من #{start})")
+    return out
+
+
 def discover_arkhasfeen_items(custom_blocked: Set[str], custom_bigrams: Set[str]) -> List[dict]:
     """اكتشاف مرشحين من قوائم «أرخص فين» (deals + gaps). هؤلاء مرشحون فقط: لا يُرسل أي شيء قبل
     إعادة فحص صفحة المتجر الحية + تأكيد أرخص سعر مقابل بقية المتاجر لنفس الموديل بنفس المطابقة الصارمة."""
@@ -2305,6 +2427,14 @@ def recheck_own_prices(cand: dict) -> Tuple[int, int]:
     for _attempt in range(3):
         html_txt, _vp = smart_fetch(link, sid, is_amazon=(sid == "amazon"), fast_mode=False, allow_proxy=False)
         if html_txt:
+            if cand.get("ark_disc"):
+                _tok = ""
+                for _lk in cand.get("lookup_keys", []):
+                    _pp = _lk.split("|", 2)
+                    if len(_pp) == 3 and len(_pp[2]) > len(_tok):
+                        _tok = _pp[2]
+                _norm = lambda t: re.sub(r"[^a-z0-9]", "", t.lower())
+                cand["page_has_model"] = bool(_tok) and _norm(_tok) in _norm(html_txt)
             price_v = extract_price_from_product_page(html_txt, sid)
             old_v = extract_old_price_from_product_page(html_txt, sid)
             if price_v > 0:
@@ -2866,7 +2996,7 @@ def main() -> None:
             active_stores.append(st)
         stores = active_stores
         stores.append({"id": "arkdisc", "name": "أرخص فين (اكتشاف)", "domain": "https://arkhasfeen.com", "type": "general",
-                       "max_deals": 6, "urls": []})
+                       "max_deals": 12, "urls": []})
         all_raw_items: List[dict] = []
         store_diag = {
             st["id"]: {
@@ -2897,6 +3027,11 @@ def main() -> None:
 
         try:
             _disc = discover_arkhasfeen_items(custom_blocked, custom_bigrams)
+            try:
+                _known = {d_["link"].split("?")[0].rstrip("/").lower() for d_ in _disc}
+                _disc.extend(discover_arkhasfeen_search(run_counter, _known, custom_blocked))
+            except Exception as e:
+                log(f"⚠ خطأ بحث أرخص فين المتنوع: {e}")
             if _disc:
                 store_diag["arkdisc"]["opened"] = True
                 store_diag["arkdisc"]["raw"] += len(_disc)
@@ -3114,6 +3249,9 @@ def main() -> None:
                     _ad = cand["ark_disc"]
                     if live_p > 0 and live_p <= cand["price"] * 1.05:
                         diag["reject_reasons"]["caught_cheaper_on_competitor_live"] += 1
+                        continue
+                    if not cand.get("page_has_model"):
+                        diag["reject_reasons"]["ark_disc_page_model_mismatch"] += 1
                         continue
                     if own_p <= cand["price"] * 1.03 and _ad["next"] >= cand["price"] * 1.07 and _ad["typical"] >= cand["price"] * 1.08:
                         gap_pct = round((_ad["next"] - cand["price"]) / _ad["next"] * 100)
