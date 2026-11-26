@@ -1321,37 +1321,49 @@ def _bo_ok(store_id: str) -> None:
 import shutil, subprocess, tempfile
 CHROME_BIN = shutil.which("google-chrome") or shutil.which("google-chrome-stable") or shutil.which("chromium") or shutil.which("chromium-browser")
 CHROME_SEM = threading.Semaphore(2)
-CHROME_STATE = {"ok": 0, "fail": 0, "consec_fail": 0, "used": 0}
+CHROME_STATE = {"ok": 0, "fail": 0, "used": 0}
+CHROME_STORE_FAIL: Dict[str, int] = defaultdict(int)
 CHROME_MAX_PER_RUN = int(os.environ.get("CHROME_MAX_PER_RUN", 120))
 CHROME_STORES = ("amazon", "noon")
+CHROME_XVFB = shutil.which("xvfb-run")
+CHROME_VARIANTS = ["headless_ac", "headful_xvfb"] if CHROME_XVFB else ["headless_ac"]
+
+
+def _chrome_cmd(variant: str, tmpd: str, url: str) -> List[str]:
+    base = [CHROME_BIN, "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", f"--user-data-dir={tmpd}",
+            "--lang=ar-EG", "--disable-blink-features=AutomationControlled", "--window-size=1366,900",
+            "--virtual-time-budget=25000", "--dump-dom"]
+    if variant == "headful_xvfb":
+        return [CHROME_XVFB, "-a", "-s", "-screen 0 1366x900x24"] + base + [url]
+    return base[:1] + ["--headless=new"] + base[1:] + [url]
 
 
 def chrome_fetch(url: str, store_id: str, is_amazon: bool = False) -> str:
     if not CHROME_BIN or store_id not in CHROME_STORES:
         return ""
-    if CHROME_STATE["used"] >= CHROME_MAX_PER_RUN or CHROME_STATE["consec_fail"] >= 8:
+    if CHROME_STATE["used"] >= CHROME_MAX_PER_RUN or CHROME_STORE_FAIL[store_id] >= 10:
         return ""
     with CHROME_SEM:
         CHROME_STATE["used"] += 1
+        variant = CHROME_VARIANTS[CHROME_STATE["used"] % len(CHROME_VARIANTS)]
         tmpd = tempfile.mkdtemp(prefix="chr_")
         try:
-            cp = subprocess.run(
-                [CHROME_BIN, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-                 f"--user-data-dir={tmpd}", "--lang=ar-EG", "--virtual-time-budget=14000", "--dump-dom", url],
-                capture_output=True, timeout=50)
+            cp = subprocess.run(_chrome_cmd(variant, tmpd, url), capture_output=True, timeout=70)
             html_txt = cp.stdout.decode("utf-8", "ignore")
             if len(html_txt) > 20000 and not is_blocked_page(html_txt, 200, is_amazon=is_amazon, store_id=store_id):
                 CHROME_STATE["ok"] += 1
-                CHROME_STATE["consec_fail"] = 0
-                FETCH_FAIL[store_id]["chrome_ok"] += 1
+                CHROME_STORE_FAIL[store_id] = 0
+                FETCH_FAIL[store_id]["chrome_ok_" + variant] += 1
                 return html_txt
             CHROME_STATE["fail"] += 1
-            CHROME_STATE["consec_fail"] += 1
-            FETCH_FAIL[store_id]["chrome_blocked_or_short"] += 1
+            CHROME_STORE_FAIL[store_id] += 1
+            _t = re.search(r"<title[^>]*>(.*?)</title>", html_txt[:20000], re.I | re.S)
+            _tt = re.sub(r"[^a-z0-9]+", "_", (_t.group(1) if _t else "notitle").lower())[:24]
+            FETCH_FAIL[store_id][f"chrome_bad_{variant}_len{len(html_txt)//5000*5}k_{_tt}"] += 1
         except Exception as _e:
             CHROME_STATE["fail"] += 1
-            CHROME_STATE["consec_fail"] += 1
-            FETCH_FAIL[store_id]["chrome_exc_" + type(_e).__name__] += 1
+            CHROME_STORE_FAIL[store_id] += 1
+            FETCH_FAIL[store_id][f"chrome_exc_{variant}_" + type(_e).__name__] += 1
         finally:
             shutil.rmtree(tmpd, ignore_errors=True)
     return ""
