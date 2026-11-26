@@ -1943,7 +1943,9 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
 
 ARK_DISC_MAX = 22
 ARK_DISC_DIAG: Counter = Counter()
-ARK_MARKET_BUDGET = 110
+ARK_MARKET_BUDGET = 170
+ARK_MARKET_STORE_CAP = {"amazon": 45, "noon": 45}
+ARK_MARKET_STORE_CAP_DEFAULT = 60
 _ARK_MKT_CACHE: Dict[str, Any] = {}
 
 
@@ -3059,6 +3061,7 @@ def main() -> None:
 
         pre_candidates: List[dict] = []
         ark_budget = [ARK_MARKET_BUDGET]
+        ark_store_used: Dict[str, int] = defaultdict(int)
 
         for st in stores:
             sid, sname = st["id"], st["name"]
@@ -3151,8 +3154,9 @@ def main() -> None:
                 )
 
                 if not is_deal:
-                    if reason == "no_real_proof" and ark_budget[0] > 0 and it["exact_model"] and it.get("category", "") in STRICT_MATCH_CATS:
+                    if reason == "no_real_proof" and ark_budget[0] > 0 and ark_store_used[sid] < ARK_MARKET_STORE_CAP.get(sid, ARK_MARKET_STORE_CAP_DEFAULT) and it["exact_model"] and it.get("category", "") in STRICT_MATCH_CATS:
                         ark_budget[0] -= 1
+                        ark_store_used[sid] += 1
                         _mp, _why = _ark_market_proof_why(it)
                         diag["reject_reasons"]["mp_" + _why] += 1
                         if _mp:
