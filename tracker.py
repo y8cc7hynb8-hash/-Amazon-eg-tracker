@@ -1317,6 +1317,46 @@ def _bo_ok(store_id: str) -> None:
         BOT_BACKOFF[store_id] = max(0.0, BOT_BACKOFF[store_id] * 0.8 - 0.2)
 
 
+# V43.12: متصفح كروم حقيقي (مجاني، مثبت على GitHub Actions) لتجاوز تحدي JS الخاص بـ Akamai/أمازون ونون
+import shutil, subprocess, tempfile
+CHROME_BIN = shutil.which("google-chrome") or shutil.which("google-chrome-stable") or shutil.which("chromium") or shutil.which("chromium-browser")
+CHROME_SEM = threading.Semaphore(2)
+CHROME_STATE = {"ok": 0, "fail": 0, "consec_fail": 0, "used": 0}
+CHROME_MAX_PER_RUN = int(os.environ.get("CHROME_MAX_PER_RUN", 120))
+CHROME_STORES = ("amazon", "noon")
+
+
+def chrome_fetch(url: str, store_id: str, is_amazon: bool = False) -> str:
+    if not CHROME_BIN or store_id not in CHROME_STORES:
+        return ""
+    if CHROME_STATE["used"] >= CHROME_MAX_PER_RUN or CHROME_STATE["consec_fail"] >= 8:
+        return ""
+    with CHROME_SEM:
+        CHROME_STATE["used"] += 1
+        tmpd = tempfile.mkdtemp(prefix="chr_")
+        try:
+            cp = subprocess.run(
+                [CHROME_BIN, "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                 f"--user-data-dir={tmpd}", "--lang=ar-EG", "--virtual-time-budget=14000", "--dump-dom", url],
+                capture_output=True, timeout=50)
+            html_txt = cp.stdout.decode("utf-8", "ignore")
+            if len(html_txt) > 20000 and not is_blocked_page(html_txt, 200, is_amazon=is_amazon, store_id=store_id):
+                CHROME_STATE["ok"] += 1
+                CHROME_STATE["consec_fail"] = 0
+                FETCH_FAIL[store_id]["chrome_ok"] += 1
+                return html_txt
+            CHROME_STATE["fail"] += 1
+            CHROME_STATE["consec_fail"] += 1
+            FETCH_FAIL[store_id]["chrome_blocked_or_short"] += 1
+        except Exception as _e:
+            CHROME_STATE["fail"] += 1
+            CHROME_STATE["consec_fail"] += 1
+            FETCH_FAIL[store_id]["chrome_exc_" + type(_e).__name__] += 1
+        finally:
+            shutil.rmtree(tmpd, ignore_errors=True)
+    return ""
+
+
 def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: bool = False, allow_proxy: bool = True) -> Tuple[str, bool]:
     """يرجع (الصفحة, هل أتت من بروكسي/كاش خارجي؟). صفحات البروكسي قد تكون مخزنة قديمة."""
     sem = get_domain_semaphore(store_id)
@@ -1337,15 +1377,20 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
         if is_amazon:
             base_headers["Cookie"] = "i18n-prefs=EGP; lc-acbamo=ar_AE"
 
+        # V43.12: عند انتحال متصفح، لا نرسل User-Agent/Accept مختلفين عن بصمة TLS (عدم التطابق علامة بوت). نترك المكتبة تضع رؤوس كروم الأصلية.
+        clean_headers = {"Accept-Language": AR_LANG}
+        if is_amazon:
+            clean_headers["Cookie"] = base_headers["Cookie"]
+
         if HAS_CFFI:
-            fps = ["chrome120", "safari17_0", "chrome116", "edge101"]
+            fps = ["chrome131", "chrome124", "chrome136", "chrome120"]
             random.shuffle(fps)
             attempts = 2 if fast_mode else (4 if store_id == "jumia" else 3)
             _n404 = 0
             for fp in fps[:attempts]:
                 try:
                     sess = cffi_requests.Session(impersonate=fp)
-                    r = sess.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
+                    r = sess.get(url, headers=clean_headers, timeout=11 if store_id == "jumia" else 9)
                     if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
                         _bo_ok(store_id)
                         return r.text, False
@@ -1364,7 +1409,7 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
             for _ in range(cs_tries):
                 try:
                     local_scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-                    r = local_scraper.get(url, headers=base_headers, timeout=11 if store_id == "jumia" else 9)
+                    r = local_scraper.get(url, headers=clean_headers, timeout=11 if store_id == "jumia" else 9)
                     if not is_blocked_page(r.text, r.status_code, is_amazon=is_amazon, store_id=store_id):
                         _bo_ok(store_id)
                         return r.text, False
@@ -1372,6 +1417,12 @@ def smart_fetch(url: str, store_id: str, is_amazon: bool = False, fast_mode: boo
                     FETCH_FAIL[store_id][f"cloudscraper_{r.status_code}_blocked"] += 1
                 except Exception as _e:
                     FETCH_FAIL[store_id]["cloudscraper_exc_" + type(_e).__name__] += 1
+
+        if store_id in CHROME_STORES:
+            _ch = chrome_fetch(url, store_id, is_amazon=is_amazon)
+            if _ch:
+                _bo_ok(store_id)
+                return _ch, False
 
         if fast_mode and store_id != "jumia":
             return "", False
