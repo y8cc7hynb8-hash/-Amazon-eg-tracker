@@ -2424,6 +2424,75 @@ def extract_old_price_from_product_page(html_text: str, store_id: str) -> int:
     return 0
 
 
+# ================= Amazon Associates / Creators API (معطّل افتراضياً حتى توفر بيانات الاعتماد) =================
+AMAZON_PARTNER_TAG = os.environ.get("AMAZON_PARTNER_TAG", "").strip()
+CREATORS_CLIENT_ID = os.environ.get("CREATORS_API_CLIENT_ID", "").strip()
+CREATORS_CLIENT_SECRET = os.environ.get("CREATORS_API_CLIENT_SECRET", "").strip()
+CREATORS_ENABLED = bool(CREATORS_CLIENT_ID and CREATORS_CLIENT_SECRET and AMAZON_PARTNER_TAG)
+_CREATORS_TOKEN = {"tok": "", "exp": 0.0}
+CREATORS_STATE = {"calls": 0, "ok": 0, "fail": 0}
+
+
+def add_partner_tag(link: str, sid: str = "") -> str:
+    """يضيف وسم الشريك إلى روابط أمازون مصر فقط، وفقط إذا ضبط المستخدم AMAZON_PARTNER_TAG."""
+    if not AMAZON_PARTNER_TAG or "amazon.eg" not in link:
+        return link
+    base = link.split("#")[0]
+    if re.search(r"[?&]tag=", base):
+        return base
+    return base + ("&" if "?" in base else "?") + "tag=" + urllib.parse.quote(AMAZON_PARTNER_TAG, safe="")
+
+
+def _creators_token() -> str:
+    if _CREATORS_TOKEN["tok"] and time.time() < _CREATORS_TOKEN["exp"] - 60:
+        return _CREATORS_TOKEN["tok"]
+    r = requests.post("https://api.amazon.co.uk/auth/o2/token", json={
+        "grant_type": "client_credentials", "client_id": CREATORS_CLIENT_ID,
+        "client_secret": CREATORS_CLIENT_SECRET, "scope": "creatorsapi::default"}, timeout=15)
+    d = r.json()
+    _CREATORS_TOKEN["tok"] = d.get("access_token", "")
+    _CREATORS_TOKEN["exp"] = time.time() + float(d.get("expires_in", 3000))
+    return _CREATORS_TOKEN["tok"]
+
+
+def creators_get_price(asin: str) -> Tuple[int, int]:
+    """السعر الرسمي (الحالي، السعر المرجعي المشطوب) لمنتج أمازون مصر عبر Creators API. (0,0) إن تعذر."""
+    if not CREATORS_ENABLED or not asin:
+        return (0, 0)
+    try:
+        CREATORS_STATE["calls"] += 1
+        tok = _creators_token()
+        if not tok:
+            CREATORS_STATE["fail"] += 1
+            return (0, 0)
+        r = requests.post("https://creatorsapi.amazon/catalog/v1/getItems", json={
+            "itemIds": [asin], "itemIdType": "ASIN", "marketplace": "www.amazon.eg",
+            "partnerTag": AMAZON_PARTNER_TAG,
+            "resources": ["itemInfo.title", "offersV2.listings.price", "offersV2.listings.isBuyBoxWinner",
+                          "offersV2.listings.availability"]},
+            headers={"Authorization": f"Bearer {tok}", "x-marketplace": "www.amazon.eg"}, timeout=15)
+        items = (r.json().get("itemsResult") or {}).get("items") or []
+        if not items:
+            CREATORS_STATE["fail"] += 1
+            return (0, 0)
+        lst = (items[0].get("offersV2") or {}).get("listings") or []
+        lst = sorted(lst, key=lambda x: 0 if x.get("isBuyBoxWinner") else 1)
+        if not lst:
+            CREATORS_STATE["fail"] += 1
+            return (0, 0)
+        pr = lst[0].get("price") or {}
+        cur = safe_int(round(safe_float((pr.get("money") or {}).get("amount"))))
+        old = safe_int(round(safe_float(((pr.get("savingBasis") or {}).get("money") or {}).get("amount"))))
+        if cur > 0:
+            CREATORS_STATE["ok"] += 1
+        else:
+            CREATORS_STATE["fail"] += 1
+        return (cur, old)
+    except Exception:
+        CREATORS_STATE["fail"] += 1
+        return (0, 0)
+
+
 def recheck_own_prices(cand: dict) -> Tuple[int, int]:
     """إعادة فحص صفحة المنتج نفسها مباشرة (بدون بروكسي/كاش) قبل أي إرسال. يرجع (السعر الحالي، السعر المشطوب)."""
     link = cand.get("clean_link") or cand.get("link", "")
@@ -2431,6 +2500,12 @@ def recheck_own_prices(cand: dict) -> Tuple[int, int]:
     if not link:
         return (0, 0)
     price_v, old_v = 0, 0
+    if sid == "amazon" and CREATORS_ENABLED:
+        _m = re.search(r"/(?:dp|gp/product)/([A-Z0-9]{10})", link, re.I)
+        if _m:
+            price_v, old_v = creators_get_price(_m.group(1).upper())
+            if price_v > 0:
+                return (price_v, old_v)
     for _attempt in range(3):
         html_txt, _vp = smart_fetch(link, sid, is_amazon=(sid == "amazon"), fast_mode=False, allow_proxy=False)
         if html_txt:
@@ -3414,7 +3489,7 @@ def main() -> None:
                 and not it.get("lowest_other") and dtype != "أرخص من المنافسين (تحقق مباشر)"
             )
             nocomp_line = "⚠️ <i>لم نعثر على نفس الموديل في المتاجر المنافسة للمقارنة المباشرة</i>\n" if no_comp else ""
-            safe_link = sanitize_url(it["link"])
+            safe_link = add_partner_tag(sanitize_url(it["link"]), sid)
 
             msg = (
                 f"{tag}\n"
