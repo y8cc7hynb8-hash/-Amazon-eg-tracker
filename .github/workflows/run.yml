@@ -37,6 +37,9 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          AMAZON_PARTNER_TAG: ${{ secrets.AMAZON_PARTNER_TAG }}
+          CREATORS_API_CLIENT_ID: ${{ secrets.CREATORS_API_CLIENT_ID }}
+          CREATORS_API_CLIENT_SECRET: ${{ secrets.CREATORS_API_CLIENT_SECRET }}
         run: |
           for i in $(seq 1 10); do
             echo "===== Scan $i / 10 - $(date -u '+%Y-%m-%d %H:%M UTC') ====="
