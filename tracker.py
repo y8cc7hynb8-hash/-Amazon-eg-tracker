@@ -2493,6 +2493,41 @@ def creators_get_price(asin: str) -> Tuple[int, int]:
         return (0, 0)
 
 
+def _ark_own_offer_price(it: dict) -> int:
+    """سعر عرض المتجر نفسه (متوفر) في «أرخص فين» لنفس الموديل بمطابقة هوية صارمة. 0 إن لم يوجد/فشل."""
+    if not it.get("exact_model") or it.get("category", "") not in STRICT_MATCH_CATS:
+        return 0
+    q = (it.get("search_query") or "").strip()
+    if len(q) < 5:
+        return 0
+    ckey = it.get("variant_key", q)
+    res = _ARK_MKT_CACHE.get(ckey)
+    if res is None:
+        res = _ark_get_json("https://arkhasfeen.com/api/search?q=" + urllib.parse.quote_plus(q))
+        if res is None:
+            return 0
+        _ARK_MKT_CACHE[ckey] = res
+    cand_keys = set(it.get("lookup_keys", []))
+    me = it.get("canonical_seller", "")
+    for prod in res.get("products") or []:
+        idr = analyze_product_identity(prod.get("reference_title") or prod.get("name") or "")
+        if idr.get("category") != it.get("category") or not (set(idr.get("lookup_keys", [])) & cand_keys):
+            continue
+        if not specs_are_compatible(it.get("specs", {}), idr.get("specs", {}), it.get("category", "")):
+            continue
+        best = 0
+        for off in prod.get("offers") or []:
+            if not off.get("in_stock", True):
+                continue
+            if get_canonical_store_id(str(off.get("store_name", ""))) == me:
+                op = safe_int(off.get("price"))
+                if op >= MIN_PRODUCT_PRICE_GLOBAL and (best == 0 or op < best):
+                    best = op
+        if best:
+            return best
+    return 0
+
+
 def sid_is_walled_fallback(cand: dict) -> bool:
     """موافقة المستخدم (27 نوفمبر): لأمازون/نون فقط، سعر «أرخص فين» للمتجر نفسه (<=2% من السعر المعروض، متوفر، موديل دقيق) كفحص أخير حين تُحجب صفحة المنتج."""
     return (cand.get("canonical_seller") in ("amazon", "noon") or cand.get("page_sid") in ("amazon", "noon")) \
@@ -3311,10 +3346,10 @@ def main() -> None:
 
                 # 1) صفحة المنتج نفسها هي الحكم الأخير على السعر
                 if own_p <= 0:
-                    if not sid_is_walled_fallback(cand):
-                        diag["reject_reasons"]["fb_n/a_not_ark_proof_or_not_exact"] += 1
+                    if not (cand.get("canonical_seller") in ("amazon", "noon") and cand.get("exact_model")):
+                        diag["reject_reasons"]["fb_n/a_not_amazon_noon_exact"] += 1
                     else:
-                        _mine = safe_int((cand.get("ark_disc") or {}).get("mine"))
+                        _mine = safe_int((cand.get("ark_disc") or {}).get("mine")) or _ark_own_offer_price(cand)
                         if _mine <= 0:
                             diag["reject_reasons"]["fb_n/a_no_store_offer_on_ark"] += 1
                         elif abs(_mine - cand["price"]) > cand["price"] * 0.02:
