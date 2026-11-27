@@ -2001,7 +2001,7 @@ def _ark_market_proof_why(it: dict) -> Tuple[Optional[dict], str]:
             return None, "not_cheapest_by_7pct"
         if typical < price * 1.08:
             return None, "not_below_typical_8pct"
-        return {"next": next_p, "next_store": next_st, "typical": typical, "stores": safe_int(prod.get("store_count"))}, "ok"
+        return {"next": next_p, "next_store": next_st, "typical": typical, "stores": safe_int(prod.get("store_count")), "mine": mine_p}, "ok"
     return None, "no_identity_match"
 
 
@@ -2491,6 +2491,12 @@ def creators_get_price(asin: str) -> Tuple[int, int]:
     except Exception:
         CREATORS_STATE["fail"] += 1
         return (0, 0)
+
+
+def sid_is_walled_fallback(cand: dict) -> bool:
+    """موافقة المستخدم (27 نوفمبر): لأمازون/نون فقط، سعر «أرخص فين» للمتجر نفسه (<=2% من السعر المعروض، متوفر، موديل دقيق) كفحص أخير حين تُحجب صفحة المنتج."""
+    return (cand.get("canonical_seller") in ("amazon", "noon") or cand.get("page_sid") in ("amazon", "noon")) \
+        and bool(cand.get("exact_model")) and bool(cand.get("ark_disc"))
 
 
 def recheck_own_prices(cand: dict) -> Tuple[int, int]:
@@ -3304,6 +3310,12 @@ def main() -> None:
                     own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched, ark_p, ark_st = 0, 0, 0, "", "", 0, False, 0, ""
 
                 # 1) صفحة المنتج نفسها هي الحكم الأخير على السعر
+                if own_p <= 0 and sid_is_walled_fallback(cand):
+                    _mine = safe_int((cand.get("ark_disc") or {}).get("mine"))
+                    if _mine > 0 and abs(_mine - cand["price"]) <= cand["price"] * 0.02:
+                        own_p = _mine
+                        cand["price_via_ark_only"] = True
+                        diag["reject_reasons"]["ark_price_fallback_used"] += 1
                 if own_p <= 0:
                     diag["reject_reasons"]["own_page_unreachable"] += 1
                     continue
@@ -3489,6 +3501,7 @@ def main() -> None:
                 and not it.get("lowest_other") and dtype != "أرخص من المنافسين (تحقق مباشر)"
             )
             nocomp_line = "⚠️ <i>لم نعثر على نفس الموديل في المتاجر المنافسة للمقارنة المباشرة</i>\n" if no_comp else ""
+            page_line = "⚠️ <i>السعر مؤكد عبر أرخص فين وليس من صفحة المتجر نفسها (الصفحة محجوبة)</i>\n" if it.get("price_via_ark_only") else ""
             safe_link = add_partner_tag(sanitize_url(it["link"]), sid)
 
             msg = (
@@ -3498,6 +3511,7 @@ def main() -> None:
                 f"💰 السعر النقدي الصافي: <b>{it['price']:,} ج.م</b>\n"
                 f"{ref_txt}\n"
                 f"{nocomp_line}"
+                f"{page_line}"
                 f"{hist_line}"
                 f"{rate_line}"
                 f"{var_line}"
