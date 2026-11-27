@@ -3310,12 +3310,19 @@ def main() -> None:
                     own_p, own_old_p, live_p, live_st, live_link, google_p, key_matched, ark_p, ark_st = 0, 0, 0, "", "", 0, False, 0, ""
 
                 # 1) صفحة المنتج نفسها هي الحكم الأخير على السعر
-                if own_p <= 0 and sid_is_walled_fallback(cand):
-                    _mine = safe_int((cand.get("ark_disc") or {}).get("mine"))
-                    if _mine > 0 and abs(_mine - cand["price"]) <= cand["price"] * 0.02:
-                        own_p = _mine
-                        cand["price_via_ark_only"] = True
-                        diag["reject_reasons"]["ark_price_fallback_used"] += 1
+                if own_p <= 0:
+                    if not sid_is_walled_fallback(cand):
+                        diag["reject_reasons"]["fb_n/a_not_ark_proof_or_not_exact"] += 1
+                    else:
+                        _mine = safe_int((cand.get("ark_disc") or {}).get("mine"))
+                        if _mine <= 0:
+                            diag["reject_reasons"]["fb_n/a_no_store_offer_on_ark"] += 1
+                        elif abs(_mine - cand["price"]) > cand["price"] * 0.02:
+                            diag["reject_reasons"]["fb_n/a_price_gap_over_2pct"] += 1
+                        else:
+                            own_p = _mine
+                            cand["price_via_ark_only"] = True
+                            diag["reject_reasons"]["ark_price_fallback_used"] += 1
                 if own_p <= 0:
                     diag["reject_reasons"]["own_page_unreachable"] += 1
                     continue
