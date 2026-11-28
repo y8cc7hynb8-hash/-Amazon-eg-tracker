@@ -3366,6 +3366,14 @@ def main() -> None:
                             own_p = _mine
                             cand["price_via_ark_only"] = True
                             diag["reject_reasons"]["ark_price_fallback_used"] += 1
+                if own_p <= 0 and cand.get("canonical_seller") in ("amazon", "noon") and not cand.get("ark_disc"):
+                    # موافقة المستخدم (28 نوفمبر): أمازون/نون فقط، وفقط حين تُحجب صفحة المنتج، وبعد إثبات مستقل حقيقي:
+                    # أرخص من نفس الموديل في متجر آخر بـ7%+ أو هبوط عن تاريخه الخاص (3+ أيام). السعر من صفحة القائمة (قبل دقائق).
+                    _dt = cand.get("deal_type", "")
+                    if _dt.startswith("أرخص من المنافسين") or _dt.startswith("هبوط تاريخي صامت موثق"):
+                        own_p = cand["price"]
+                        cand["price_via_listing"] = True
+                        diag["reject_reasons"]["listing_price_fallback_used"] += 1
                 if own_p <= 0:
                     diag["reject_reasons"]["own_page_unreachable"] += 1
                     continue
@@ -3552,6 +3560,8 @@ def main() -> None:
             )
             nocomp_line = "⚠️ <i>لم نعثر على نفس الموديل في المتاجر المنافسة للمقارنة المباشرة</i>\n" if no_comp else ""
             page_line = "⚠️ <i>السعر مؤكد عبر أرخص فين وليس من صفحة المتجر نفسها (الصفحة محجوبة)</i>\n" if it.get("price_via_ark_only") else ""
+            if it.get("price_via_listing"):
+                page_line = "⚠️ <i>السعر من صفحة قائمة المتجر قبل دقائق؛ صفحة المنتج لم تُفتح (محجوبة)</i>\n"
             safe_link = add_partner_tag(sanitize_url(it["link"]), sid)
 
             msg = (
