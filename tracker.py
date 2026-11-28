@@ -1948,6 +1948,7 @@ def _arkhasfeen_lowest_price(cand: dict) -> Tuple[int, str]:
 
 ARK_DISC_MAX = 22
 ARK_DISC_DIAG: Counter = Counter()
+CAT_DIAG: Counter = Counter()   # تشخيص لكل فئة: seen / hist_ok / سبب الرفض / sent
 ARK_MARKET_BUDGET = 170
 ARK_MARKET_STORE_CAP = {"amazon": 45, "noon": 45}
 ARK_MARKET_STORE_CAP_DEFAULT = 60
@@ -3274,6 +3275,13 @@ def main() -> None:
                     reviews=safe_int(it.get("reviews"))
                 )
 
+                CAT_DIAG[f"{item_cat}|seen"] += 1
+                if str(h_stats.get("history_strength") or "none") in ("strong", "medium") and safe_int(h_stats.get("obs_days_30d")) >= 3:
+                    CAT_DIAG[f"{item_cat}|hist_ok"] += 1
+                if it.get("exact_model"):
+                    CAT_DIAG[f"{item_cat}|exact"] += 1
+                CAT_DIAG[f"{item_cat}|{'PASS' if is_deal else reason}"] += 1
+
                 if not is_deal:
                     if reason == "no_real_proof" and ark_budget[0] > 0 and ark_store_used[sid] < ARK_MARKET_STORE_CAP.get(sid, ARK_MARKET_STORE_CAP_DEFAULT) and it["exact_model"] and it.get("category", "") in STRICT_MATCH_CATS:
                         ark_budget[0] -= 1
@@ -3584,6 +3592,7 @@ def main() -> None:
                 store_diag[sid]["sent"] += 1
                 cat_sent_limits[item_cat] += 1
                 cat_sent_counter[cat_badge] += 1
+                CAT_DIAG[f"{item_cat}|sent"] += 1
                 total_sent += 1
                 if total_sent % 5 == 0:
                     save_json(STATE_FILE, state)
@@ -3627,6 +3636,7 @@ def main() -> None:
                                   "fetch_fail": dict(FETCH_FAIL.get(sid_, {})),
                                   "backoff_s": round(BOT_BACKOFF.get(sid_, 0), 1)} for sid_, d_ in store_diag.items()},
                 "ark_discovery": dict(ARK_DISC_DIAG),
+                "by_cat": dict(CAT_DIAG),
             })
             save_json(STATS_FILE, {"runs": _runs[-300:]})
         except Exception as e:
